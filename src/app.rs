@@ -1137,11 +1137,28 @@ impl App {
             
             // Set recipient to the original sender (reply-to if present, otherwise from)
             let reply_to_addrs = original.reply_to();
-            reply.to = if !reply_to_addrs.is_empty() {
+            let mut to_addresses = if !reply_to_addrs.is_empty() {
                 reply_to_addrs
             } else {
                 original.from.clone()
             };
+            
+            // Deduplicate addresses (in case there are duplicates in the original)
+            to_addresses.dedup_by(|a, b| a.address == b.address);
+            reply.to = to_addresses;
+            
+            // Debug: Log what we're setting as To addresses
+            if std::env::var("EMAIL_DEBUG").is_ok() {
+                let debug_msg = format!("Reply To addresses: {:?}", 
+                    reply.to.iter().map(|addr| &addr.address).collect::<Vec<_>>());
+                if let Ok(mut file) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open("/tmp/email_client_debug.log") {
+                    use std::io::Write;
+                    let _ = writeln!(file, "[{}] {}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"), debug_msg);
+                }
+            }
             
             // Set from field to current account
             let current_account = &self.config.accounts[self.current_account_idx];
@@ -1258,6 +1275,10 @@ impl App {
                     reply.cc.push(addr.clone());
                 }
             }
+            
+            // Deduplicate all addresses to prevent duplicates
+            reply.to.dedup_by(|a, b| a.address == b.address);
+            reply.cc.dedup_by(|a, b| a.address == b.address);
             
             // Set In-Reply-To and References headers for proper threading
             let original_msg_id = original.message_id();
