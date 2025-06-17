@@ -240,36 +240,105 @@ impl Email {
         
         debug_log("Starting header extraction...");
         
+        // First, try to use mail_parser's built-in address extraction
+        let from_header = parsed.from();
+        match from_header {
+            mail_parser::HeaderValue::Address(addr) => {
+                debug_log("Found single from address using mail_parser API");
+                let name = addr.name.as_ref().map(|s| s.to_string());
+                let address = addr.address.as_ref().map(|s| s.to_string()).unwrap_or_default();
+                debug_log(&format!("  From via API: name={:?}, address='{}'", name, address));
+                
+                if !address.is_empty() {
+                    email.from.push(EmailAddress { name, address });
+                }
+            }
+            mail_parser::HeaderValue::AddressList(addrs) => {
+                debug_log(&format!("Found {} from addresses using mail_parser API", addrs.len()));
+                for (i, addr) in addrs.iter().enumerate() {
+                    let name = addr.name.as_ref().map(|s| s.to_string());
+                    let address = addr.address.as_ref().map(|s| s.to_string()).unwrap_or_default();
+                    debug_log(&format!("  From[{}] via API: name={:?}, address='{}'", i, name, address));
+                    
+                    if !address.is_empty() {
+                        email.from.push(EmailAddress { name, address });
+                    }
+                }
+            }
+            _ => {
+                debug_log("No from addresses found via mail_parser API");
+            }
+        }
+        
         // Extract headers and parse addresses from them
         let mut header_count = 0;
         for header in parsed.headers() {
             header_count += 1;
             let name = header.name().to_string();
-            if let Some(value) = header.value().as_text_ref() {
-                email.headers.insert(name.clone(), value.to_string());
-                
-                debug_log(&format!("Header[{}]: '{}' = '{}'", header_count, name, value));
+            
+            // Try multiple ways to extract header value
+            let value = if let Some(text_value) = header.value().as_text_ref() {
+                Some(text_value.to_string())
+            } else {
+                // Try to get raw value and decode it
+                match header.value() {
+                    mail_parser::HeaderValue::Text(t) => Some(t.to_string()),
+                    mail_parser::HeaderValue::TextList(list) => {
+                        Some(list.iter().map(|s| s.as_ref()).collect::<Vec<_>>().join(", "))
+                    }
+                    mail_parser::HeaderValue::Address(addr) => {
+                        // Extract address information manually
+                        let name = addr.name.as_ref().map(|n| n.to_string()).unwrap_or_default();
+                        let email = addr.address.as_ref().map(|s| s.to_string()).unwrap_or_default();
+                        if name.is_empty() {
+                            Some(email)
+                        } else {
+                            Some(format!("{} <{}>", name, email))
+                        }
+                    }
+                    mail_parser::HeaderValue::AddressList(list) => {
+                        let addr_strings: Vec<String> = list.iter().map(|addr| {
+                            let name = addr.name.as_ref().map(|n| n.to_string()).unwrap_or_default();
+                            let email = addr.address.as_ref().map(|s| s.to_string()).unwrap_or_default();
+                            if name.is_empty() {
+                                email
+                            } else {
+                                format!("{} <{}>", name, email)
+                            }
+                        }).collect();
+                        Some(addr_strings.join(", "))
+                    }
+                    mail_parser::HeaderValue::DateTime(dt) => {
+                        Some(format!("{}", dt))
+                    }
+                    _ => None
+                }
+            };
+            
+            if let Some(value_str) = value {
+                email.headers.insert(name.clone(), value_str.clone());
+                debug_log(&format!("Header[{}]: '{}' = '{}'", header_count, name, value_str));
                 
                 // Parse basic from/to information from headers
                 match name.to_lowercase().as_str() {
                     "from" => {
-                        debug_log(&format!("Found From header: '{}'", value));
-                        let addresses = parse_email_addresses(value);
+                        debug_log(&format!("Found From header: '{}'", value_str));
+                        let addresses = parse_email_addresses(&value_str);
                         debug_log(&format!("Parsed {} addresses from From header", addresses.len()));
                         email.from.extend(addresses);
                     }
                     "to" => {
-                        let addresses = parse_email_addresses(value);
+                        let addresses = parse_email_addresses(&value_str);
                         email.to.extend(addresses);
                     }
                     "cc" => {
-                        let addresses = parse_email_addresses(value);
+                        let addresses = parse_email_addresses(&value_str);
                         email.cc.extend(addresses);
                     }
                     _ => {}
                 }
             } else {
-                debug_log(&format!("Header[{}]: '{}' has no text value", header_count, name));
+                debug_log(&format!("Header[{}]: '{}' has no extractable value", header_count, name));
             }
         }
         

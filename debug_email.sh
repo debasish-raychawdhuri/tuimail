@@ -13,7 +13,7 @@ echo "Press Ctrl+C to stop the email client and view the debug log."
 echo ""
 
 # Run the email client with debug enabled
-EMAIL_DEBUG=1 ./email_client
+EMAIL_DEBUG=1 ./target/debug/email_client
 
 echo ""
 echo "=== DEBUG LOG CONTENTS ==="
