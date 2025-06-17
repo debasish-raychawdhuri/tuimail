@@ -1,0 +1,18 @@
+This is a test attachment file for the email client.
+
+You can attach this file to test the attachment functionality:
+1. Press 'c' to compose an email
+2. Press Ctrl+A to add an attachment
+3. Type: test_attachment.txt
+4. Press Enter to attach the file
+5. You should see it appear in the attachments list
+
+The file contains some sample text to demonstrate that the attachment system can handle text files properly.
+
+Features demonstrated:
+- File reading and attachment
+- Content-type detection (text/plain)
+- File size calculation
+- Attachment display in compose mode
+
+This test file is located in the email client directory for easy access.

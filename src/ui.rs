@@ -333,6 +333,12 @@ fn render_email_body(f: &mut Frame, email: &Email, area: Rect) {
 }
 
 fn render_compose_mode(f: &mut Frame, app: &App, area: Rect) {
+    // If in attachment input mode, show the input dialog
+    if app.attachment_input_mode {
+        render_attachment_input_dialog(f, app, area);
+        return;
+    }
+    
     // Determine layout based on whether there are attachments
     let constraints = if app.compose_email.attachments.is_empty() {
         vec![
@@ -443,6 +449,46 @@ fn render_compose_mode(f: &mut Frame, app: &App, area: Rect) {
         .wrap(Wrap { trim: false });
     
     f.render_widget(body, chunks[body_chunk_idx]);
+}
+
+fn render_attachment_input_dialog(f: &mut Frame, app: &App, area: Rect) {
+    // Create a centered dialog for file path input
+    let dialog_area = centered_rect(60, 20, area);
+    
+    // Clear the background
+    let clear = Block::default().style(Style::default().bg(Color::Black));
+    f.render_widget(clear, area);
+    
+    // Create the input dialog
+    let cursor_pos = app.attachment_input_text.len();
+    
+    // Add cursor indicator
+    let display_text = if cursor_pos < app.attachment_input_text.len() {
+        format!("{}│{}", 
+            &app.attachment_input_text[..cursor_pos],
+            &app.attachment_input_text[cursor_pos..])
+    } else {
+        format!("{}│", app.attachment_input_text)
+    };
+    
+    let dialog_content = vec![
+        Line::from("Add Attachment"),
+        Line::from(""),
+        Line::from(format!("File path: {}", display_text)),
+        Line::from(""),
+        Line::from("Tab - Auto-complete ~/Downloads/"),
+        Line::from("Enter - Add attachment"),
+        Line::from("Esc - Cancel"),
+    ];
+    
+    let dialog = Paragraph::new(dialog_content)
+        .block(Block::default()
+            .title("Add Attachment")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Yellow)))
+        .style(Style::default().fg(Color::White));
+    
+    f.render_widget(dialog, dialog_area);
 }
 
 fn render_compose_attachments(f: &mut Frame, app: &App, area: Rect) {

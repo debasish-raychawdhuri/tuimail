@@ -118,6 +118,8 @@ pub struct App {
     
     // Attachment handling
     pub selected_attachment_idx: Option<usize>, // For viewing attachments in received emails
+    pub attachment_input_mode: bool, // Whether we're in file path input mode
+    pub attachment_input_text: String, // File path being typed
 }
 
 impl App {
@@ -213,6 +215,8 @@ impl App {
             compose_cursor_pos: 0,
             compose_to_text: String::new(),
             selected_attachment_idx: None,
+            attachment_input_mode: false,
+            attachment_input_text: String::new(),
         }
     }
     
@@ -719,6 +723,11 @@ impl App {
     }
     
     fn handle_compose_mode(&mut self, key: KeyEvent) -> AppResult<()> {
+        // Handle attachment input mode separately
+        if self.attachment_input_mode {
+            return self.handle_attachment_input(key);
+        }
+        
         match key.code {
             KeyCode::Esc => {
                 self.mode = AppMode::Normal;
@@ -1498,6 +1507,46 @@ impl App {
         }
     }
 
+    /// Handle key input when in attachment file path input mode
+    fn handle_attachment_input(&mut self, key: KeyEvent) -> AppResult<()> {
+        match key.code {
+            KeyCode::Esc => {
+                // Cancel attachment input
+                self.attachment_input_mode = false;
+                self.attachment_input_text.clear();
+                self.show_info("Attachment input cancelled");
+                Ok(())
+            }
+            KeyCode::Enter => {
+                // Try to add the attachment
+                let file_path = self.attachment_input_text.trim().to_string();
+                if !file_path.is_empty() {
+                    self.add_attachment_from_path(&file_path)?;
+                }
+                self.attachment_input_mode = false;
+                self.attachment_input_text.clear();
+                Ok(())
+            }
+            KeyCode::Tab => {
+                // Auto-complete common paths
+                if self.attachment_input_text.is_empty() || self.attachment_input_text == "~" {
+                    self.attachment_input_text = format!("{}/Downloads/", 
+                        std::env::var("HOME").unwrap_or_else(|_| ".".to_string()));
+                }
+                Ok(())
+            }
+            KeyCode::Backspace => {
+                self.attachment_input_text.pop();
+                Ok(())
+            }
+            KeyCode::Char(c) => {
+                self.attachment_input_text.push(c);
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
     /// Save the selected attachment from the current email
     pub fn save_selected_attachment(&mut self) -> AppResult<()> {
         if let Some(email_idx) = self.selected_email_idx {
@@ -1589,38 +1638,33 @@ impl App {
     
     /// Add an attachment to the compose email
     pub fn add_attachment(&mut self) -> AppResult<()> {
-        // For now, we'll implement a simple file path input
-        // In a real implementation, you might want to use a proper file picker
-        
-        // TODO: Implement proper file picker dialog
-        // For demonstration, let's add a sample attachment
-        self.show_info("Attachment feature implemented - use file picker in production");
-        
-        // Example of how to add an attachment programmatically:
-        /*
-        let attachment = crate::email::EmailAttachment {
-            filename: "example.txt".to_string(),
-            content_type: "text/plain".to_string(),
-            data: b"This is a sample attachment".to_vec(),
-        };
-        self.compose_email.attachments.push(attachment);
-        */
-        
+        // Enter attachment input mode
+        self.attachment_input_mode = true;
+        self.attachment_input_text.clear();
+        self.show_info("Enter file path to attach (Tab for ~/Downloads, Esc to cancel)");
         Ok(())
     }
     
     /// Add an attachment from a file path
     pub fn add_attachment_from_path(&mut self, file_path: &str) -> AppResult<()> {
-        match std::fs::read(file_path) {
+        // Expand tilde to home directory
+        let expanded_path = if file_path.starts_with("~/") {
+            let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+            file_path.replacen("~", &home, 1)
+        } else {
+            file_path.to_string()
+        };
+        
+        match std::fs::read(&expanded_path) {
             Ok(data) => {
-                let filename = std::path::Path::new(file_path)
+                let filename = std::path::Path::new(&expanded_path)
                     .file_name()
                     .and_then(|name| name.to_str())
                     .unwrap_or("unknown")
                     .to_string();
                 
                 // Determine content type based on file extension
-                let content_type = match std::path::Path::new(file_path)
+                let content_type = match std::path::Path::new(&expanded_path)
                     .extension()
                     .and_then(|ext| ext.to_str()) {
                     Some("txt") => "text/plain",
@@ -1642,10 +1686,10 @@ impl App {
                 };
                 
                 self.compose_email.attachments.push(attachment);
-                self.show_info(&format!("Added attachment: {}", file_path));
+                self.show_info(&format!("Added attachment: {}", expanded_path));
             }
             Err(e) => {
-                self.show_error(&format!("Failed to read file {}: {}", file_path, e));
+                self.show_error(&format!("Failed to read file {}: {}", expanded_path, e));
             }
         }
         Ok(())
