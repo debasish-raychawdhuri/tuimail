@@ -113,6 +113,7 @@ pub struct App {
     
     // Compose form state
     pub compose_field: ComposeField,
+    pub compose_cursor_pos: usize, // Cursor position in the current field
 }
 
 impl App {
@@ -205,6 +206,7 @@ impl App {
             last_sync: None,
             is_syncing: false,
             compose_field: ComposeField::To,
+            compose_cursor_pos: 0,
         }
     }
     
@@ -634,6 +636,7 @@ impl App {
                 self.focus = FocusPanel::ComposeForm;
                 self.compose_email = Email::new();
                 self.compose_field = ComposeField::To;
+                self.compose_cursor_pos = 0;
                 Ok(())
             }
             KeyCode::Char('r') => {
@@ -709,6 +712,7 @@ impl App {
                 self.mode = AppMode::Normal;
                 self.focus = FocusPanel::EmailList;
                 self.compose_field = ComposeField::To;
+                self.compose_cursor_pos = 0;
                 Ok(())
             }
             KeyCode::Tab => {
@@ -718,6 +722,10 @@ impl App {
                     ComposeField::Subject => ComposeField::Body,
                     ComposeField::Body => ComposeField::To,
                 };
+                // Reset cursor position when entering body field
+                if self.compose_field == ComposeField::Body {
+                    self.compose_cursor_pos = 0;
+                }
                 Ok(())
             }
             KeyCode::BackTab => {
@@ -727,6 +735,10 @@ impl App {
                     ComposeField::Subject => ComposeField::To,
                     ComposeField::Body => ComposeField::Subject,
                 };
+                // Reset cursor position when entering body field
+                if self.compose_field == ComposeField::Body {
+                    self.compose_cursor_pos = 0;
+                }
                 Ok(())
             }
             KeyCode::Up => {
@@ -736,6 +748,10 @@ impl App {
                     ComposeField::Subject => ComposeField::To,
                     ComposeField::Body => ComposeField::Subject,
                 };
+                // Reset cursor position when entering body field
+                if self.compose_field == ComposeField::Body {
+                    self.compose_cursor_pos = 0;
+                }
                 Ok(())
             }
             KeyCode::Down => {
@@ -745,6 +761,10 @@ impl App {
                     ComposeField::Subject => ComposeField::Body,
                     ComposeField::Body => ComposeField::To,
                 };
+                // Reset cursor position when entering body field
+                if self.compose_field == ComposeField::Body {
+                    self.compose_cursor_pos = 0;
+                }
                 Ok(())
             }
             KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -752,7 +772,7 @@ impl App {
                 Ok(())
             }
             KeyCode::Char(c) => {
-                // Add character to current field
+                // Add character to current field at cursor position
                 match self.compose_field {
                     ComposeField::To => {
                         let to_string = self.compose_email.to.iter()
@@ -778,16 +798,24 @@ impl App {
                     }
                     ComposeField::Body => {
                         if let Some(ref mut body) = self.compose_email.body_text {
-                            body.push(c);
+                            // Insert character at cursor position
+                            if self.compose_cursor_pos <= body.len() {
+                                body.insert(self.compose_cursor_pos, c);
+                                self.compose_cursor_pos += 1;
+                            } else {
+                                body.push(c);
+                                self.compose_cursor_pos = body.len();
+                            }
                         } else {
                             self.compose_email.body_text = Some(c.to_string());
+                            self.compose_cursor_pos = 1;
                         }
                     }
                 }
                 Ok(())
             }
             KeyCode::Backspace => {
-                // Remove character from current field
+                // Remove character from current field at cursor position
                 match self.compose_field {
                     ComposeField::To => {
                         if let Some(last_addr) = self.compose_email.to.last_mut() {
@@ -804,19 +832,77 @@ impl App {
                     }
                     ComposeField::Body => {
                         if let Some(ref mut body) = self.compose_email.body_text {
-                            body.pop();
+                            if self.compose_cursor_pos > 0 && self.compose_cursor_pos <= body.len() {
+                                body.remove(self.compose_cursor_pos - 1);
+                                self.compose_cursor_pos -= 1;
+                            }
                         }
                     }
                 }
                 Ok(())
             }
             KeyCode::Enter => {
-                // In body field, add newline
+                // In body field, add newline at cursor position
                 if self.compose_field == ComposeField::Body {
                     if let Some(ref mut body) = self.compose_email.body_text {
-                        body.push('\n');
+                        if self.compose_cursor_pos <= body.len() {
+                            body.insert(self.compose_cursor_pos, '\n');
+                            self.compose_cursor_pos += 1;
+                        } else {
+                            body.push('\n');
+                            self.compose_cursor_pos = body.len();
+                        }
                     } else {
                         self.compose_email.body_text = Some("\n".to_string());
+                        self.compose_cursor_pos = 1;
+                    }
+                }
+                Ok(())
+            }
+            KeyCode::Left => {
+                // Move cursor left in body field
+                if self.compose_field == ComposeField::Body && self.compose_cursor_pos > 0 {
+                    self.compose_cursor_pos -= 1;
+                }
+                Ok(())
+            }
+            KeyCode::Right => {
+                // Move cursor right in body field
+                if self.compose_field == ComposeField::Body {
+                    if let Some(body) = &self.compose_email.body_text {
+                        if self.compose_cursor_pos < body.len() {
+                            self.compose_cursor_pos += 1;
+                        }
+                    }
+                }
+                Ok(())
+            }
+            KeyCode::Home => {
+                // Move cursor to beginning of current line in body field
+                if self.compose_field == ComposeField::Body {
+                    if let Some(body) = &self.compose_email.body_text {
+                        // Find the beginning of the current line
+                        let text_before_cursor = &body[..self.compose_cursor_pos];
+                        if let Some(last_newline) = text_before_cursor.rfind('\n') {
+                            self.compose_cursor_pos = last_newline + 1;
+                        } else {
+                            self.compose_cursor_pos = 0;
+                        }
+                    }
+                }
+                Ok(())
+            }
+            KeyCode::End => {
+                // Move cursor to end of current line in body field
+                if self.compose_field == ComposeField::Body {
+                    if let Some(body) = &self.compose_email.body_text {
+                        // Find the end of the current line
+                        let text_after_cursor = &body[self.compose_cursor_pos..];
+                        if let Some(next_newline) = text_after_cursor.find('\n') {
+                            self.compose_cursor_pos += next_newline;
+                        } else {
+                            self.compose_cursor_pos = body.len();
+                        }
                     }
                 }
                 Ok(())
@@ -1033,7 +1119,7 @@ impl App {
                 reply.set_references(refs);
             }
             
-            // Set body with quoted original
+            // Set body with space for typing at the top, then quoted original
             if let Some(body) = &original.body_text {
                 let sender_name = if !original.from.is_empty() {
                     if let Some(name) = &original.from[0].name {
@@ -1045,20 +1131,24 @@ impl App {
                     "Unknown".to_string()
                 };
                 
+                // Put cursor space at the top, then quoted content below
                 reply.body_text = Some(format!(
-                    "\n\nOn {} {} wrote:\n{}", 
+                    "\n\n\n\nOn {} {} wrote:\n{}", 
                     original.date.format("%Y-%m-%d %H:%M"),
                     sender_name,
                     body.lines().map(|line| format!("> {}", line)).collect::<Vec<_>>().join("\n")
                 ));
+            } else {
+                reply.body_text = Some("\n\n\n\n".to_string());
             }
             
             self.compose_email = reply;
             self.mode = AppMode::Compose;
             self.focus = FocusPanel::ComposeForm;
-            self.compose_field = ComposeField::Body; // Start in body field for reply
+            self.compose_field = ComposeField::Body;
+            self.compose_cursor_pos = 0; // Position cursor at the very beginning
             
-            self.show_info("Replying to email");
+            self.show_info("Replying to email - cursor positioned at top");
         } else {
             self.show_error("No email selected");
         }
@@ -1131,7 +1221,7 @@ impl App {
                 reply.set_references(refs);
             }
             
-            // Set body with quoted original
+            // Set body with space for typing at the top, then quoted original
             if let Some(body) = &original.body_text {
                 let sender_name = if !original.from.is_empty() {
                     if let Some(name) = &original.from[0].name {
@@ -1143,20 +1233,24 @@ impl App {
                     "Unknown".to_string()
                 };
                 
+                // Put cursor space at the top, then quoted content below
                 reply.body_text = Some(format!(
-                    "\n\nOn {} {} wrote:\n{}", 
+                    "\n\n\n\nOn {} {} wrote:\n{}", 
                     original.date.format("%Y-%m-%d %H:%M"),
                     sender_name,
                     body.lines().map(|line| format!("> {}", line)).collect::<Vec<_>>().join("\n")
                 ));
+            } else {
+                reply.body_text = Some("\n\n\n\n".to_string());
             }
             
             self.compose_email = reply;
             self.mode = AppMode::Compose;
             self.focus = FocusPanel::ComposeForm;
-            self.compose_field = ComposeField::Body; // Start in body field for reply
+            self.compose_field = ComposeField::Body;
+            self.compose_cursor_pos = 0; // Position cursor at the very beginning
             
-            self.show_info("Replying to all recipients");
+            self.show_info("Replying to all - cursor positioned at top");
         } else {
             self.show_error("No email selected");
         }
@@ -1189,7 +1283,7 @@ impl App {
                 address: current_account.email.clone(),
             }];
             
-            // Set body with forwarded content header
+            // Set body with space for typing at the top, then forwarded content header
             let from_str = original.from.iter()
                 .map(|addr| {
                     if let Some(name) = &addr.name {
@@ -1213,7 +1307,7 @@ impl App {
                 .join(", ");
             
             let mut forward_header = format!(
-                "\n\n---------- Forwarded message ----------\nFrom: {}\nDate: {}\nSubject: {}\nTo: {}",
+                "\n\n\n\n---------- Forwarded message ----------\nFrom: {}\nDate: {}\nSubject: {}\nTo: {}",
                 from_str,
                 original.date.format("%a, %d %b %Y %H:%M:%S %z"),
                 original.subject,
@@ -1251,8 +1345,9 @@ impl App {
             self.mode = AppMode::Compose;
             self.focus = FocusPanel::ComposeForm;
             self.compose_field = ComposeField::To; // Start in To field for forward
+            self.compose_cursor_pos = 0; // Position cursor at the beginning
             
-            self.show_info("Forwarding email");
+            self.show_info("Forwarding email - add recipients");
         } else {
             self.show_error("No email selected");
         }

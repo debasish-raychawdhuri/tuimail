@@ -277,7 +277,7 @@ fn render_compose_mode(f: &mut Frame, app: &App, area: Rect) {
     
     f.render_widget(header, chunks[0]);
     
-    // Render compose form body with highlighting
+    // Render compose form body with highlighting and cursor
     let content = app.compose_email.body_text.as_deref().unwrap_or("");
     
     let body_style = if app.compose_field == crate::app::ComposeField::Body {
@@ -287,12 +287,26 @@ fn render_compose_mode(f: &mut Frame, app: &App, area: Rect) {
     };
     
     let body_title = if app.compose_field == crate::app::ComposeField::Body {
-        "Body (Active - Type to edit)"
+        "Body (Active - Type to edit, ←→ to move cursor)"
     } else {
         "Body"
     };
     
-    let body = Paragraph::new(content)
+    // If we're in the body field, show cursor by inserting a cursor character
+    let display_content = if app.compose_field == crate::app::ComposeField::Body {
+        let cursor_pos = app.compose_cursor_pos.min(content.len());
+        let mut display_text = content.to_string();
+        
+        // Insert cursor character at the cursor position
+        if cursor_pos <= display_text.len() {
+            display_text.insert(cursor_pos, '│'); // Vertical bar as cursor
+        }
+        display_text
+    } else {
+        content.to_string()
+    };
+    
+    let body = Paragraph::new(display_content)
         .block(Block::default()
             .borders(Borders::ALL)
             .title(body_title)
