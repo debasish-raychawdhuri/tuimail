@@ -419,9 +419,11 @@ fn render_help_mode(f: &mut Frame, _app: &App, area: Rect) {
 fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
     let mut text = String::new();
     
-    // Show current folder
-    if !app.folders.is_empty() {
-        text.push_str(&format!("Folder: {} | ", app.folders[app.selected_folder_idx]));
+    // Show current account and folder
+    if let Some(account_data) = app.accounts.get(&app.current_account_idx) {
+        if !account_data.folders.is_empty() {
+            text.push_str(&format!("Folder: {} | ", account_data.folders[account_data.selected_folder_idx]));
+        }
     }
     
     // Show email count

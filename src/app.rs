@@ -1,14 +1,12 @@
-use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Local};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use tokio::sync::mpsc;
 use thiserror::Error;
 
 use crate::config::Config;
 use crate::credentials::SecureCredentials;
-use crate::email::{Email, EmailClient, EmailFetcher};
+use crate::email::{Email, EmailClient};
 
 #[derive(Error, Debug)]
 pub enum AppError {
@@ -69,8 +67,6 @@ pub struct AccountData {
     pub emails: Vec<Email>,
     pub selected_folder_idx: usize,
     pub email_client: Option<EmailClient>,
-    pub email_rx: Option<mpsc::Receiver<Vec<Email>>>,
-    pub email_fetcher: Option<EmailFetcher>,
 }
 
 impl AccountData {
@@ -80,8 +76,6 @@ impl AccountData {
             emails: Vec::new(),
             selected_folder_idx: 0,
             email_client: None,
-            email_rx: None,
-            email_fetcher: None,
         }
     }
 }
@@ -99,27 +93,24 @@ pub struct App {
     pub folder_items: Vec<FolderItem>, // Hierarchical folder view
     pub selected_folder_item_idx: usize,
     
-    // Legacy fields for backward compatibility (will be removed)
+    // Current view state (for the selected account/folder)
     pub emails: Vec<Email>,
-    pub folders: Vec<String>,
-    pub selected_folder_idx: usize,
     pub selected_email_idx: Option<usize>,
     
     pub compose_email: Email,
     pub error_message: Option<String>,
     pub info_message: Option<String>,
     pub message_timeout: Option<Instant>,
-    pub email_client: Option<EmailClient>,
-    pub email_rx: Option<mpsc::Receiver<Vec<Email>>>,
-    pub email_fetcher: Option<EmailFetcher>,
-    pub last_tick: Instant,
+    
     // Scrolling state
     pub email_scroll_offset: usize,
     pub folder_scroll_offset: usize,
     pub email_view_scroll: usize,
+    
     // Sync status
     pub last_sync: Option<DateTime<Local>>,
     pub is_syncing: bool,
+    
     // Compose form state
     pub compose_field: ComposeField,
 }
@@ -199,20 +190,15 @@ impl App {
             folder_items,
             selected_folder_item_idx: 0,
             
-            // Legacy fields (for backward compatibility)
+            // Current view state
             emails: Vec::new(),
-            folders: vec!["INBOX".to_string()],
-            selected_folder_idx: 0,
             selected_email_idx: None,
             
             compose_email: Email::new(),
             error_message: None,
             info_message: None,
             message_timeout: None,
-            email_client: None,
-            email_rx: None,
-            email_fetcher: None,
-            last_tick: Instant::now(),
+            
             email_scroll_offset: 0,
             folder_scroll_offset: 0,
             email_view_scroll: 0,
@@ -573,61 +559,6 @@ impl App {
         Ok(())
     }
     
-    pub fn load_folders(&mut self) -> AppResult<()> {
-        if let Some(client) = &self.email_client {
-            match client.list_folders() {
-                Ok(folders) => {
-                    self.folders = folders;
-                    Ok(())
-                }
-                Err(e) => {
-                    self.show_error(&format!("Failed to load folders: {}", e));
-                    Err(AppError::EmailError(e))
-                }
-            }
-        } else {
-            self.show_error("Email client not initialized");
-            Ok(())
-        }
-    }
-    
-    pub fn load_emails(&mut self) -> AppResult<()> {
-        let folder = self.folders[self.selected_folder_idx].clone();
-        
-        // Clone the client to avoid borrowing issues
-        let client = match &self.email_client {
-            Some(client) => client.clone(),
-            None => {
-                self.show_error("Email client not initialized");
-                return Ok(());
-            }
-        };
-        
-        // Show syncing status
-        self.is_syncing = true;
-        self.show_info(&format!("Syncing {}...", folder));
-        
-        match client.fetch_emails(&folder, 50) {
-            Ok(emails) => {
-                self.emails = emails;
-                self.selected_email_idx = if self.emails.is_empty() { None } else { Some(0) };
-                self.last_sync = Some(Local::now());
-                self.is_syncing = false;
-                
-                // Show sync result
-                let sync_time = self.last_sync.unwrap().format("%H:%M:%S");
-                self.show_info(&format!("Synced {} - {} emails at {}", 
-                    folder, self.emails.len(), sync_time));
-                Ok(())
-            }
-            Err(e) => {
-                self.is_syncing = false;
-                self.show_error(&format!("Failed to sync {}: {}", folder, e));
-                Err(AppError::EmailError(e))
-            }
-        }
-    }
-    
     pub fn handle_key_event(&mut self, key: KeyEvent) -> AppResult<()> {
         match self.mode {
             AppMode::Normal => self.handle_normal_mode(key),
@@ -653,8 +584,12 @@ impl App {
                 Ok(())
             }
             KeyCode::Char('r') => {
-                self.load_emails()?;
-                self.show_info("Emails refreshed");
+                // Refresh emails for the currently selected folder
+                if let Err(e) = self.load_emails_for_selected_folder() {
+                    self.show_error(&format!("Failed to refresh emails: {}", e));
+                } else {
+                    self.show_info("Emails refreshed");
+                }
                 Ok(())
             }
             KeyCode::Char('f') => {
@@ -684,14 +619,16 @@ impl App {
                         self.mode = AppMode::ViewEmail;
                         
                         // Mark as read
-                        if let Some(client) = &self.email_client {
-                            let email = &self.emails[idx];
-                            if !email.seen {
-                                if let Err(e) = client.mark_as_read(email) {
-                                    self.show_error(&format!("Failed to mark email as read: {}", e));
-                                } else {
-                                    // Update local state
-                                    self.emails[idx].seen = true;
+                        if let Some(account_data) = self.accounts.get(&self.current_account_idx) {
+                            if let Some(client) = &account_data.email_client {
+                                let email = &self.emails[idx];
+                                if !email.seen {
+                                    if let Err(e) = client.mark_as_read(email) {
+                                        self.show_error(&format!("Failed to mark email as read: {}", e));
+                                    } else {
+                                        // Update local state
+                                        self.emails[idx].seen = true;
+                                    }
                                 }
                             }
                         }
@@ -995,47 +932,6 @@ impl App {
         }
     }
     
-    pub fn delete_selected_email(&mut self) -> AppResult<()> {
-        if let Some(idx) = self.selected_email_idx {
-            if idx >= self.emails.len() {
-                self.show_error("Invalid email selection");
-                return Ok(());
-            }
-            
-            let email = &self.emails[idx];
-            
-            if let Some(client) = &self.email_client {
-                match client.delete_email(email) {
-                    Ok(_) => {
-                        self.emails.remove(idx);
-                        
-                        // Adjust selection after deletion
-                        if self.emails.is_empty() {
-                            self.selected_email_idx = None;
-                        } else if idx >= self.emails.len() {
-                            // If we deleted the last email, select the new last email
-                            self.selected_email_idx = Some(self.emails.len() - 1);
-                        }
-                        // If we deleted an email in the middle, the selection stays the same
-                        // which will now point to the next email
-                        
-                        self.show_info("Email deleted");
-                    }
-                    Err(e) => {
-                        self.show_error(&format!("Failed to delete email: {}", e));
-                        return Err(AppError::EmailError(e));
-                    }
-                }
-            } else {
-                self.show_error("Email client not initialized");
-            }
-        } else {
-            self.show_error("No email selected");
-        }
-        
-        Ok(())
-    }
-    
     pub fn reply_to_email(&mut self) -> AppResult<()> {
         if let Some(idx) = self.selected_email_idx {
             if idx >= self.emails.len() {
@@ -1119,35 +1015,89 @@ impl App {
         Ok(())
     }
     
-    pub fn send_email(&mut self) -> AppResult<()> {
-        if let Some(client) = &self.email_client {
-            // Set from address if not set
-            if self.compose_email.from.is_empty() {
-                let account = self.config.get_current_account_safe();
-                self.compose_email.from.push(crate::email::EmailAddress {
-                    name: Some(account.name.clone()),
-                    address: account.email.clone(),
-                });
+    /// Delete the currently selected email using the current account
+    pub fn delete_selected_email(&mut self) -> AppResult<()> {
+        if let Some(idx) = self.selected_email_idx {
+            if idx >= self.emails.len() {
+                self.show_error("Invalid email selection");
+                return Ok(());
             }
             
-            match client.send_email(&self.compose_email) {
-                Ok(_) => {
-                    self.show_info("Email sent successfully");
-                    self.mode = AppMode::Normal;
-                    self.focus = FocusPanel::EmailList;
-                    Ok(())
+            let email = &self.emails[idx];
+            
+            // Get the current account's email client
+            if let Some(account_data) = self.accounts.get(&self.current_account_idx) {
+                if let Some(client) = &account_data.email_client {
+                    match client.delete_email(email) {
+                        Ok(_) => {
+                            self.emails.remove(idx);
+                            
+                            // Adjust selection after deletion
+                            if self.emails.is_empty() {
+                                self.selected_email_idx = None;
+                            } else if idx >= self.emails.len() {
+                                // If we deleted the last email, select the new last email
+                                self.selected_email_idx = Some(self.emails.len() - 1);
+                            }
+                            // If we deleted an email in the middle, the selection stays the same
+                            // which will now point to the next email
+                            
+                            self.show_info("Email deleted");
+                        }
+                        Err(e) => {
+                            self.show_error(&format!("Failed to delete email: {}", e));
+                            return Err(AppError::EmailError(e));
+                        }
+                    }
+                } else {
+                    self.show_error("Email client not initialized for current account");
                 }
-                Err(e) => {
-                    self.show_error(&format!("Failed to send email: {}", e));
-                    Err(AppError::EmailError(e))
-                }
+            } else {
+                self.show_error("Current account not found");
             }
         } else {
-            self.show_error("Email client not initialized");
+            self.show_error("No email selected");
+        }
+        
+        Ok(())
+    }
+
+    /// Send the composed email using the current account
+    pub fn send_email(&mut self) -> AppResult<()> {
+        // Get the current account's email client
+        if let Some(account_data) = self.accounts.get(&self.current_account_idx) {
+            if let Some(client) = &account_data.email_client {
+                // Set from address if not set
+                if self.compose_email.from.is_empty() {
+                    let account = &self.config.accounts[self.current_account_idx];
+                    self.compose_email.from.push(crate::email::EmailAddress {
+                        name: Some(account.name.clone()),
+                        address: account.email.clone(),
+                    });
+                }
+                
+                match client.send_email(&self.compose_email) {
+                    Ok(_) => {
+                        self.show_info("Email sent successfully");
+                        self.mode = AppMode::Normal;
+                        self.focus = FocusPanel::EmailList;
+                        Ok(())
+                    }
+                    Err(e) => {
+                        self.show_error(&format!("Failed to send email: {}", e));
+                        Err(AppError::EmailError(e))
+                    }
+                }
+            } else {
+                self.show_error("Email client not initialized for current account");
+                Ok(())
+            }
+        } else {
+            self.show_error("Current account not found");
             Ok(())
         }
     }
-    
+
     pub fn show_error(&mut self, message: &str) {
         self.error_message = Some(message.to_string());
         self.message_timeout = Some(Instant::now() + Duration::from_secs(5));
@@ -1159,38 +1109,6 @@ impl App {
     }
     
     pub fn tick(&mut self) -> AppResult<()> {
-        // Check for new emails from the background fetcher
-        if let Some(rx) = &mut self.email_rx {
-            match rx.try_recv() {
-                Ok(emails) => {
-                    // Update emails and maintain selection if possible
-                    let old_selection = self.selected_email_idx;
-                    self.emails = emails;
-                    
-                    // Try to maintain selection after update
-                    if let Some(old_idx) = old_selection {
-                        if old_idx >= self.emails.len() {
-                            // If old selection is out of bounds, select the last email
-                            self.selected_email_idx = if self.emails.is_empty() {
-                                None
-                            } else {
-                                Some(self.emails.len() - 1)
-                            };
-                        }
-                        // Otherwise keep the same selection
-                    }
-                }
-                Err(mpsc::error::TryRecvError::Empty) => {
-                    // No new emails, this is normal
-                }
-                Err(mpsc::error::TryRecvError::Disconnected) => {
-                    // Background fetcher has stopped, this might indicate an error
-                    self.show_error("Background email fetcher disconnected");
-                    self.email_rx = None; // Clear the receiver to avoid repeated errors
-                }
-            }
-        }
-        
         // Clear messages after timeout
         if let Some(timeout) = self.message_timeout {
             if std::time::Instant::now() > timeout {
@@ -1204,11 +1122,4 @@ impl App {
     }
 }
 
-impl Drop for App {
-    fn drop(&mut self) {
-        // Stop the email fetcher if it exists
-        if let Some(mut fetcher) = self.email_fetcher.take() {
-            fetcher.stop();
-        }
-    }
-}
+
