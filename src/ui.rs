@@ -6,7 +6,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::{App, AppMode, FocusPanel};
+use crate::app::{App, AppMode};
 use crate::email::Email;
 
 pub fn ui(f: &mut Frame, app: &App) {
@@ -65,27 +65,43 @@ fn render_normal_mode(f: &mut Frame, app: &App, area: Rect) {
 
 fn render_folder_list(f: &mut Frame, app: &App, area: Rect) {
     let items: Vec<ListItem> = app
-        .folders
+        .folder_items
         .iter()
         .enumerate()
-        .map(|(i, folder)| {
-            let style = if i == app.selected_folder_idx && app.focus == FocusPanel::FolderList {
-                Style::default().fg(Color::Yellow)
-            } else {
-                Style::default()
+        .map(|(i, item)| {
+            let (text, style) = match item {
+                crate::app::FolderItem::Account { name, email, expanded, .. } => {
+                    let prefix = if *expanded { "▼ " } else { "▶ " };
+                    let display_text = format!("{}{} <{}>", prefix, name, email);
+                    let style = if i == app.selected_folder_item_idx {
+                        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+                    };
+                    (display_text, style)
+                }
+                crate::app::FolderItem::Folder { name, .. } => {
+                    let display_text = format!("  📁 {}", name);
+                    let style = if i == app.selected_folder_item_idx {
+                        Style::default().fg(Color::Yellow)
+                    } else {
+                        Style::default().fg(Color::White)
+                    };
+                    (display_text, style)
+                }
             };
             
-            ListItem::new(folder.as_str()).style(style)
+            ListItem::new(text).style(style)
         })
         .collect();
 
     let folders = List::new(items)
-        .block(Block::default().title("Folders").borders(Borders::ALL))
+        .block(Block::default().title("Accounts & Folders").borders(Borders::ALL))
         .highlight_style(Style::default().add_modifier(Modifier::BOLD));
 
     // Add scrolling support
     let mut state = ratatui::widgets::ListState::default();
-    state.select(Some(app.selected_folder_idx));
+    state.select(Some(app.selected_folder_item_idx));
 
     f.render_stateful_widget(folders, area, &mut state);
 }
@@ -289,32 +305,48 @@ fn render_compose_mode(f: &mut Frame, app: &App, area: Rect) {
 
 fn render_folder_list_mode(f: &mut Frame, app: &App, area: Rect) {
     let items: Vec<ListItem> = app
-        .folders
+        .folder_items
         .iter()
         .enumerate()
-        .map(|(i, folder)| {
-            let style = if i == app.selected_folder_idx {
-                Style::default().fg(Color::Yellow)
-            } else {
-                Style::default()
+        .map(|(i, item)| {
+            let (text, style) = match item {
+                crate::app::FolderItem::Account { name, email, expanded, .. } => {
+                    let prefix = if *expanded { "▼ " } else { "▶ " };
+                    let display_text = format!("{}{} <{}>", prefix, name, email);
+                    let style = if i == app.selected_folder_item_idx {
+                        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+                    };
+                    (display_text, style)
+                }
+                crate::app::FolderItem::Folder { name, .. } => {
+                    let display_text = format!("  📁 {}", name);
+                    let style = if i == app.selected_folder_item_idx {
+                        Style::default().fg(Color::Yellow)
+                    } else {
+                        Style::default().fg(Color::White)
+                    };
+                    (display_text, style)
+                }
             };
             
-            ListItem::new(folder.as_str()).style(style)
+            ListItem::new(text).style(style)
         })
         .collect();
 
     let folders = List::new(items)
         .block(Block::default()
-            .title("Select Folder (↑/↓: Navigate, Enter: Select, Esc: Cancel)")
+            .title("Select Account or Folder (↑/↓: Navigate, Enter: Select/Expand, Esc: Cancel)")
             .borders(Borders::ALL))
         .highlight_style(Style::default().add_modifier(Modifier::BOLD));
 
     // Add scrolling support
     let mut state = ratatui::widgets::ListState::default();
-    state.select(Some(app.selected_folder_idx));
+    state.select(Some(app.selected_folder_item_idx));
 
     // Center the folder list
-    let centered_area = centered_rect(60, 80, area);
+    let centered_area = centered_rect(80, 80, area);
     f.render_stateful_widget(folders, centered_area, &mut state);
 }
 

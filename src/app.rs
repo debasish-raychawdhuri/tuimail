@@ -39,10 +39,50 @@ pub enum AppMode {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FocusPanel {
+    AccountList,
     FolderList,
     EmailList,
     EmailView,
     ComposeForm,
+}
+
+/// Represents a folder item in the hierarchical view
+#[derive(Debug, Clone)]
+pub enum FolderItem {
+    Account {
+        name: String,
+        email: String,
+        index: usize,
+        expanded: bool,
+    },
+    Folder {
+        name: String,
+        account_index: usize,
+        full_path: String, // For IMAP folder path
+    },
+}
+
+/// Account-specific folder and email data
+pub struct AccountData {
+    pub folders: Vec<String>,
+    pub emails: Vec<Email>,
+    pub selected_folder_idx: usize,
+    pub email_client: Option<EmailClient>,
+    pub email_rx: Option<mpsc::Receiver<Vec<Email>>>,
+    pub email_fetcher: Option<EmailFetcher>,
+}
+
+impl AccountData {
+    pub fn new() -> Self {
+        Self {
+            folders: vec!["INBOX".to_string()],
+            emails: Vec::new(),
+            selected_folder_idx: 0,
+            email_client: None,
+            email_rx: None,
+            email_fetcher: None,
+        }
+    }
 }
 
 pub struct App {
@@ -51,10 +91,19 @@ pub struct App {
     pub should_quit: bool,
     pub mode: AppMode,
     pub focus: FocusPanel,
+    
+    // Multi-account support
+    pub accounts: std::collections::HashMap<usize, AccountData>,
+    pub current_account_idx: usize,
+    pub folder_items: Vec<FolderItem>, // Hierarchical folder view
+    pub selected_folder_item_idx: usize,
+    
+    // Legacy fields for backward compatibility (will be removed)
     pub emails: Vec<Email>,
     pub folders: Vec<String>,
     pub selected_folder_idx: usize,
     pub selected_email_idx: Option<usize>,
+    
     pub compose_email: Email,
     pub error_message: Option<String>,
     pub info_message: Option<String>,
@@ -78,17 +127,53 @@ impl App {
     pub fn new(config: Config) -> Self {
         let credentials = SecureCredentials::new()
             .expect("Failed to initialize secure credential storage");
+        
+        // Initialize accounts data structure
+        let mut accounts = std::collections::HashMap::new();
+        let mut folder_items = Vec::new();
+        
+        // Create folder items for each account
+        for (index, account) in config.accounts.iter().enumerate() {
+            accounts.insert(index, AccountData::new());
+            
+            folder_items.push(FolderItem::Account {
+                name: account.name.clone(),
+                email: account.email.clone(),
+                index,
+                expanded: index == config.default_account, // Expand default account
+            });
+            
+            // Add default folders for expanded accounts
+            if index == config.default_account {
+                folder_items.push(FolderItem::Folder {
+                    name: "INBOX".to_string(),
+                    account_index: index,
+                    full_path: "INBOX".to_string(),
+                });
+            }
+        }
+        
+        let current_account_idx = config.default_account;
             
         Self {
             config,
             credentials,
             should_quit: false,
             mode: AppMode::Normal,
-            focus: FocusPanel::EmailList,
+            focus: FocusPanel::FolderList,
+            
+            // Multi-account support
+            accounts,
+            current_account_idx,
+            folder_items,
+            selected_folder_item_idx: 0,
+            
+            // Legacy fields (for backward compatibility)
             emails: Vec::new(),
             folders: vec!["INBOX".to_string()],
             selected_folder_idx: 0,
             selected_email_idx: None,
+            
             compose_email: Email::new(),
             error_message: None,
             info_message: None,
@@ -103,6 +188,203 @@ impl App {
             last_sync: None,
             is_syncing: false,
             compose_field: ComposeField::To,
+        }
+    }
+    
+    // Multi-account support methods
+    
+    /// Get the current account data
+    pub fn current_account(&self) -> Option<&AccountData> {
+        self.accounts.get(&self.current_account_idx)
+    }
+    
+    /// Get mutable reference to current account data
+    pub fn current_account_mut(&mut self) -> Option<&mut AccountData> {
+        self.accounts.get_mut(&self.current_account_idx)
+    }
+    
+    /// Switch to a different account
+    pub fn switch_account(&mut self, account_idx: usize) -> AppResult<()> {
+        if account_idx < self.config.accounts.len() {
+            self.current_account_idx = account_idx;
+            self.rebuild_folder_items();
+            self.init_account(account_idx)?;
+            Ok(())
+        } else {
+            Err(AppError::EmailError(crate::email::EmailError::ImapError(
+                "Invalid account index".to_string()
+            )))
+        }
+    }
+    
+    /// Toggle account expansion in folder view
+    pub fn toggle_account_expansion(&mut self, account_idx: usize) {
+        // Find and toggle the account
+        for item in &mut self.folder_items {
+            if let FolderItem::Account { index, expanded, .. } = item {
+                if *index == account_idx {
+                    *expanded = !*expanded;
+                    break;
+                }
+            }
+        }
+        self.rebuild_folder_items();
+    }
+    
+    /// Rebuild the folder items list based on account expansion states
+    pub fn rebuild_folder_items(&mut self) {
+        let mut new_items = Vec::new();
+        
+        for (account_idx, account_config) in self.config.accounts.iter().enumerate() {
+            // Find if this account is expanded
+            let expanded = self.folder_items.iter()
+                .find_map(|item| {
+                    if let FolderItem::Account { index, expanded, .. } = item {
+                        if *index == account_idx {
+                            Some(*expanded)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(account_idx == self.current_account_idx);
+            
+            new_items.push(FolderItem::Account {
+                name: account_config.name.clone(),
+                email: account_config.email.clone(),
+                index: account_idx,
+                expanded,
+            });
+            
+            // Add folders if expanded
+            if expanded {
+                if let Some(account_data) = self.accounts.get(&account_idx) {
+                    for folder in &account_data.folders {
+                        new_items.push(FolderItem::Folder {
+                            name: folder.clone(),
+                            account_index: account_idx,
+                            full_path: folder.clone(),
+                        });
+                    }
+                }
+            }
+        }
+        
+        self.folder_items = new_items;
+        
+        // Ensure selected index is valid
+        if self.selected_folder_item_idx >= self.folder_items.len() {
+            self.selected_folder_item_idx = self.folder_items.len().saturating_sub(1);
+        }
+    }
+    
+    /// Initialize a specific account (create email client, load folders)
+    pub fn init_account(&mut self, account_idx: usize) -> AppResult<()> {
+        if account_idx >= self.config.accounts.len() {
+            return Err(AppError::EmailError(crate::email::EmailError::ImapError(
+                "Invalid account index".to_string()
+            )));
+        }
+        
+        let account_config = &self.config.accounts[account_idx];
+        
+        // Create email client for this account
+        let client = EmailClient::new(
+            account_config.clone(),
+            self.credentials.clone(),
+        );
+        
+        // Get or create account data
+        let account_data = self.accounts.entry(account_idx).or_insert_with(AccountData::new);
+        account_data.email_client = Some(client);
+        
+        // Load folders for this account
+        self.load_folders_for_account(account_idx)?;
+        
+        Ok(())
+    }
+    
+    /// Load folders for a specific account
+    pub fn load_folders_for_account(&mut self, account_idx: usize) -> AppResult<()> {
+        if let Some(account_data) = self.accounts.get_mut(&account_idx) {
+            if let Some(client) = &account_data.email_client {
+                match client.list_folders() {
+                    Ok(folders) => {
+                        account_data.folders = folders;
+                        self.rebuild_folder_items();
+                        Ok(())
+                    }
+                    Err(e) => {
+                        self.show_error(&format!("Failed to load folders for account {}: {}", account_idx, e));
+                        Err(AppError::EmailError(e))
+                    }
+                }
+            } else {
+                Err(AppError::EmailError(crate::email::EmailError::ImapError(
+                    "No email client for account".to_string()
+                )))
+            }
+        } else {
+            Err(AppError::EmailError(crate::email::EmailError::ImapError(
+                "Account not found".to_string()
+            )))
+        }
+    }
+    
+    /// Get currently selected folder info
+    pub fn get_selected_folder_info(&self) -> Option<(usize, String)> {
+        if let Some(item) = self.folder_items.get(self.selected_folder_item_idx) {
+            match item {
+                FolderItem::Folder { account_index, full_path, .. } => {
+                    Some((*account_index, full_path.clone()))
+                }
+                _ => None,
+            }
+        } else {
+            None
+        }
+    }
+    
+    /// Load emails for the currently selected folder
+    pub fn load_emails_for_selected_folder(&mut self) -> AppResult<()> {
+        if let Some((account_idx, folder_path)) = self.get_selected_folder_info() {
+            self.load_emails_for_account_folder(account_idx, &folder_path)
+        } else {
+            Ok(()) // No folder selected
+        }
+    }
+    
+    /// Load emails for a specific account and folder
+    pub fn load_emails_for_account_folder(&mut self, account_idx: usize, folder: &str) -> AppResult<()> {
+        if let Some(account_data) = self.accounts.get_mut(&account_idx) {
+            if let Some(client) = &account_data.email_client {
+                match client.fetch_emails(folder, 50) {
+                    Ok(emails) => {
+                        account_data.emails = emails;
+                        
+                        // Update legacy fields for backward compatibility
+                        if account_idx == self.current_account_idx {
+                            self.emails = account_data.emails.clone();
+                        }
+                        
+                        Ok(())
+                    }
+                    Err(e) => {
+                        self.show_error(&format!("Failed to load emails: {}", e));
+                        Err(AppError::EmailError(e))
+                    }
+                }
+            } else {
+                Err(AppError::EmailError(crate::email::EmailError::ImapError(
+                    "No email client for account".to_string()
+                )))
+            }
+        } else {
+            Err(AppError::EmailError(crate::email::EmailError::ImapError(
+                "Account not found".to_string()
+            )))
         }
     }
     
@@ -129,62 +411,15 @@ impl App {
             ));
         }
         
-        // Create email client with bounds checking
-        let account = match self.config.get_current_account() {
-            Ok(account) => account.clone(),
-            Err(e) => {
-                self.show_error(&format!("Configuration error: {}", e));
-                return Err(AppError::EmailError(
-                    crate::email::EmailError::ImapError(e.to_string())
-                ));
+        // Initialize the current account
+        self.init_account(self.current_account_idx)?;
+        
+        // Load emails for the first folder of the current account
+        if let Some(account_data) = self.accounts.get(&self.current_account_idx) {
+            if !account_data.folders.is_empty() {
+                let folder = account_data.folders[0].clone();
+                self.load_emails_for_account_folder(self.current_account_idx, &folder)?;
             }
-        };
-        
-        // Debug logging
-        if std::env::var("EMAIL_DEBUG").is_ok() {
-            let log_file = "/tmp/email_client_debug.log";
-            if let Ok(mut file) = std::fs::OpenOptions::new()
-                .create(true)
-                .write(true)
-                .append(true)
-                .open(log_file) 
-            {
-                use std::io::Write;
-                let _ = writeln!(file, "[{}] Creating EmailClient for account: {}", 
-                    Local::now().format("%Y-%m-%d %H:%M:%S"), account.email);
-            }
-        }
-        
-        let email_client = EmailClient::new(account, self.credentials.clone());
-        
-        // Set up channels for email fetching
-        let (tx, rx) = mpsc::channel(100);
-        
-        // Create and start email fetcher
-        let mut fetcher = EmailFetcher::new(
-            email_client.clone(),
-            tx,
-            self.config.ui.refresh_interval,
-        );
-        fetcher.start();
-        
-        // Store components
-        self.email_client = Some(email_client);
-        self.email_rx = Some(rx);
-        self.email_fetcher = Some(fetcher);
-        
-        // Load folders with error handling
-        if let Err(e) = self.load_folders() {
-            self.show_error(&format!("Failed to load folders: {}", e));
-            // Continue with default folders
-            self.folders = vec!["INBOX".to_string()];
-        }
-        
-        // Load initial emails with error handling
-        if let Err(e) = self.load_emails() {
-            self.show_error(&format!("Failed to load emails: {}", e));
-            // Continue with empty email list
-            self.emails = Vec::new();
         }
         
         Ok(())
@@ -500,38 +735,51 @@ impl App {
         match key.code {
             KeyCode::Esc => {
                 self.mode = AppMode::Normal;
-                self.focus = FocusPanel::EmailList;
+                self.focus = FocusPanel::FolderList;
                 Ok(())
             }
             KeyCode::Up => {
-                if !self.folders.is_empty() && self.selected_folder_idx > 0 {
-                    self.selected_folder_idx -= 1;
-                    // Auto-sync when switching folders
-                    if let Err(e) = self.load_emails() {
-                        self.show_error(&format!("Failed to load emails: {}", e));
-                    }
+                if !self.folder_items.is_empty() && self.selected_folder_item_idx > 0 {
+                    self.selected_folder_item_idx -= 1;
                 }
                 Ok(())
             }
             KeyCode::Down => {
-                if !self.folders.is_empty() && self.selected_folder_idx < self.folders.len().saturating_sub(1) {
-                    self.selected_folder_idx += 1;
-                    // Auto-sync when switching folders
-                    if let Err(e) = self.load_emails() {
-                        self.show_error(&format!("Failed to load emails: {}", e));
-                    }
+                if !self.folder_items.is_empty() && self.selected_folder_item_idx < self.folder_items.len().saturating_sub(1) {
+                    self.selected_folder_item_idx += 1;
                 }
                 Ok(())
             }
             KeyCode::Enter => {
-                if self.selected_folder_idx < self.folders.len() {
-                    self.mode = AppMode::Normal;
-                    self.focus = FocusPanel::EmailList;
-                    if let Err(e) = self.load_emails() {
-                        self.show_error(&format!("Failed to load emails: {}", e));
+                if let Some(item) = self.folder_items.get(self.selected_folder_item_idx).cloned() {
+                    match item {
+                        crate::app::FolderItem::Account { index, .. } => {
+                            // Toggle account expansion
+                            self.toggle_account_expansion(index);
+                        }
+                        crate::app::FolderItem::Folder { account_index, full_path, .. } => {
+                            // Select folder and switch to normal mode
+                            self.current_account_idx = account_index;
+                            self.mode = AppMode::Normal;
+                            self.focus = FocusPanel::EmailList;
+                            
+                            // Load emails for the selected folder
+                            if let Err(e) = self.load_emails_for_account_folder(account_index, &full_path) {
+                                self.show_error(&format!("Failed to load emails: {}", e));
+                            }
+                        }
                     }
                 } else {
-                    self.show_error("Invalid folder selection");
+                    self.show_error("Invalid selection");
+                }
+                Ok(())
+            }
+            KeyCode::Char(' ') => {
+                // Space bar also toggles account expansion
+                if let Some(item) = self.folder_items.get(self.selected_folder_item_idx).cloned() {
+                    if let crate::app::FolderItem::Account { index, .. } = item {
+                        self.toggle_account_expansion(index);
+                    }
                 }
                 Ok(())
             }
