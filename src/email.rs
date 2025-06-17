@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::fs;
 use std::fs::OpenOptions;
@@ -16,6 +16,25 @@ use tokio::sync::mpsc;
 use serde::{Serialize, Deserialize};
 
 use crate::config::{EmailAccount, ImapSecurity, SmtpSecurity};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FolderMetadata {
+    pub last_uid: u32,
+    pub total_messages: u32,
+    pub last_sync: DateTime<Local>,
+    pub downloaded_uids: HashSet<u32>,
+}
+
+impl FolderMetadata {
+    fn new() -> Self {
+        Self {
+            last_uid: 0,
+            total_messages: 0,
+            last_sync: Local::now(),
+            downloaded_uids: std::collections::HashSet::new(),
+        }
+    }
+}
 
 // Helper function to log debug information to a file
 fn debug_log(message: &str) {
@@ -403,6 +422,29 @@ impl EmailClient {
         format!("{}/{}.json", self.cache_dir, folder.replace('/', "_"))
     }
     
+    fn get_metadata_file(&self, folder: &str) -> String {
+        format!("{}/{}_metadata.json", self.cache_dir, folder.replace('/', "_"))
+    }
+    
+    fn load_folder_metadata(&self, folder: &str) -> FolderMetadata {
+        let metadata_file = self.get_metadata_file(folder);
+        if let Ok(content) = fs::read_to_string(&metadata_file) {
+            if let Ok(metadata) = serde_json::from_str::<FolderMetadata>(&content) {
+                return metadata;
+            }
+        }
+        FolderMetadata::new()
+    }
+    
+    fn save_folder_metadata(&self, folder: &str, metadata: &FolderMetadata) {
+        let metadata_file = self.get_metadata_file(folder);
+        if let Ok(content) = serde_json::to_string_pretty(metadata) {
+            if let Err(e) = fs::write(&metadata_file, content) {
+                debug_log(&format!("Warning: Could not save folder metadata: {}", e));
+            }
+        }
+    }
+    
     fn load_cached_emails(&self, folder: &str) -> Vec<Email> {
         let cache_file = self.get_cache_file(folder);
         if let Ok(content) = fs::read_to_string(&cache_file) {
@@ -418,6 +460,36 @@ impl EmailClient {
         if let Ok(content) = serde_json::to_string_pretty(emails) {
             if let Err(e) = fs::write(&cache_file, content) {
                 eprintln!("Warning: Could not save email cache: {}", e);
+            }
+        }
+    }
+    
+    pub fn force_full_sync(&self, folder: &str) -> Result<Vec<Email>, EmailError> {
+        debug_log(&format!("force_full_sync called for folder: {}", folder));
+        
+        // Reset metadata to force full sync
+        let mut metadata = FolderMetadata::new();
+        
+        let new_emails = match self.account.imap_security {
+            ImapSecurity::SSL | ImapSecurity::StartTLS => {
+                self.fetch_emails_incrementally_secure(folder, &mut metadata)
+            }
+            ImapSecurity::None => {
+                self.fetch_emails_incrementally_plain(folder, &mut metadata)
+            }
+        };
+        
+        match new_emails {
+            Ok(emails) => {
+                // Save the emails and metadata
+                self.save_cached_emails(folder, &emails);
+                self.save_folder_metadata(folder, &metadata);
+                debug_log(&format!("Full sync completed: {} emails", emails.len()));
+                Ok(emails)
+            }
+            Err(e) => {
+                debug_log(&format!("Full sync failed: {}", e));
+                Err(e)
             }
         }
     }
@@ -510,18 +582,20 @@ impl EmailClient {
     pub fn fetch_emails(&self, folder: &str, limit: usize) -> Result<Vec<Email>, EmailError> {
         debug_log(&format!("fetch_emails called: folder='{}', limit={}", folder, limit));
         
-        // Load cached emails first
+        // Load cached emails and metadata
         let cached_emails = self.load_cached_emails(folder);
-        debug_log(&format!("Loaded {} cached emails", cached_emails.len()));
+        let mut metadata = self.load_folder_metadata(folder);
+        debug_log(&format!("Loaded {} cached emails, last_uid={}, total_messages={}", 
+            cached_emails.len(), metadata.last_uid, metadata.total_messages));
         
-        // Fetch new emails from server
+        // Fetch new emails from server incrementally
         debug_log(&format!("Fetching new emails from server using security: {:?}", self.account.imap_security));
         let new_emails = match self.account.imap_security {
             ImapSecurity::SSL | ImapSecurity::StartTLS => {
-                self.fetch_emails_from_server_secure(folder, limit)
+                self.fetch_emails_incrementally_secure(folder, &mut metadata)
             }
             ImapSecurity::None => {
-                self.fetch_emails_from_server_plain(folder, limit)
+                self.fetch_emails_incrementally_plain(folder, &mut metadata)
             }
         };
         
@@ -533,14 +607,20 @@ impl EmailClient {
                 let merged = self.merge_emails(cached_emails, new);
                 debug_log(&format!("After merging: {} total emails", merged.len()));
                 
-                // Save updated cache
-                self.save_cached_emails(folder, &merged);
-                debug_log("Saved updated cache");
+                // Update metadata
+                metadata.last_sync = Local::now();
+                metadata.total_messages = merged.len() as u32;
                 
-                // Return limited number for display, but keep all in cache
-                let display_limit = std::cmp::min(limit * 3, merged.len()); // Show more than requested
-                debug_log(&format!("Returning {} emails for display (limit was {})", display_limit, limit));
-                Ok(merged.into_iter().take(display_limit).collect())
+                // Save updated cache and metadata
+                self.save_cached_emails(folder, &merged);
+                self.save_folder_metadata(folder, &metadata);
+                debug_log("Saved updated cache and metadata");
+                
+                // Return all emails (or limited for display)
+                let display_limit = std::cmp::max(limit, 100); // Show at least 100 emails
+                let result_count = std::cmp::min(display_limit, merged.len());
+                debug_log(&format!("Returning {} emails for display", result_count));
+                Ok(merged.into_iter().take(result_count).collect())
             }
             Err(e) => {
                 debug_log(&format!("Server fetch failed: {}", e));
@@ -556,78 +636,179 @@ impl EmailClient {
         }
     }
     
-    fn fetch_emails_from_server_secure(&self, folder: &str, limit: usize) -> Result<Vec<Email>, EmailError> {
-        let mut session = self.connect_imap_secure()?;
-        
+    fn fetch_emails_incrementally_secure(&self, folder: &str, metadata: &mut FolderMetadata) -> Result<Vec<Email>, EmailError> {
+        let tls = TlsConnector::builder().build().unwrap();
+        let client = imap::connect(
+            (self.account.imap_server.as_str(), self.account.imap_port),
+            &self.account.imap_server,
+            &tls,
+        ).map_err(|e| EmailError::ImapError(e.to_string()))?;
+
+        let mut session = client
+            .login(&self.account.imap_username, &self.account.imap_password)
+            .map_err(|e| EmailError::ImapError(e.0.to_string()))?;
+
         session
             .select(folder)
             .map_err(|e| EmailError::ImapError(e.to_string()))?;
-        
-        let message_ids: Vec<u32> = session
-            .search("ALL")
-            .map_err(|e| EmailError::ImapError(e.to_string()))?
-            .into_iter()
-            .collect();
-        
-        let message_count = message_ids.len();
-        let start_idx = if message_count > limit {
-            message_count - limit
-        } else {
-            0
-        };
-        
-        if message_ids.is_empty() {
-            return Ok(Vec::new());
-        }
-        
-        let sequence = if start_idx < message_count {
-            format!("{}:*", message_ids[start_idx])
-        } else {
-            return Ok(Vec::new());
-        };
-        
-        let messages = session
-            .fetch(sequence, "(RFC822 FLAGS UID)")
+
+        // Get current folder status
+        let mailbox = session.examine(folder)
             .map_err(|e| EmailError::ImapError(e.to_string()))?;
         
-        self.parse_messages(&messages, folder)
+        let current_total = mailbox.exists;
+        debug_log(&format!("Folder '{}' has {} total messages, we have {} cached", 
+            folder, current_total, metadata.downloaded_uids.len()));
+
+        // First time sync - fetch recent messages
+        if metadata.last_uid == 0 {
+            debug_log("First time sync - fetching recent messages");
+            let fetch_count = std::cmp::min(100, current_total); // Fetch last 100 messages initially
+            let start_seq = if current_total > fetch_count {
+                current_total - fetch_count + 1
+            } else {
+                1
+            };
+            
+            let sequence = format!("{}:{}", start_seq, current_total);
+            debug_log(&format!("Initial sync: fetching messages {}", sequence));
+            
+            let messages = session
+                .fetch(sequence, "(RFC822 FLAGS UID)")
+                .map_err(|e| EmailError::ImapError(e.to_string()))?;
+
+            debug_log(&format!("Initial sync: fetched {} messages", messages.len()));
+            
+            let new_emails = self.parse_messages(&messages, folder)?;
+            
+            // Update metadata with all fetched UIDs
+            for message in &messages {
+                if let Some(uid) = message.uid {
+                    metadata.downloaded_uids.insert(uid);
+                    if uid > metadata.last_uid {
+                        metadata.last_uid = uid;
+                    }
+                }
+            }
+            metadata.total_messages = current_total;
+            
+            return Ok(new_emails);
+        }
+
+        // Incremental sync - fetch only new messages
+        if current_total <= metadata.total_messages {
+            debug_log("No new messages to fetch");
+            return Ok(Vec::new());
+        }
+
+        let start_uid = metadata.last_uid + 1;
+        debug_log(&format!("Incremental sync: fetching messages with UID >= {}", start_uid));
+
+        // Use UID FETCH to get only new messages
+        let sequence = format!("{}:*", start_uid);
+        let messages = session
+            .uid_fetch(sequence, "(RFC822 FLAGS UID)")
+            .map_err(|e| EmailError::ImapError(e.to_string()))?;
+
+        debug_log(&format!("Incremental sync: fetched {} new messages", messages.len()));
+
+        let new_emails = self.parse_messages(&messages, folder)?;
+        
+        // Update metadata with new UIDs
+        for message in &messages {
+            if let Some(uid) = message.uid {
+                metadata.downloaded_uids.insert(uid);
+                if uid > metadata.last_uid {
+                    metadata.last_uid = uid;
+                }
+            }
+        }
+        metadata.total_messages = current_total;
+
+        Ok(new_emails)
     }
-    
-    fn fetch_emails_from_server_plain(&self, folder: &str, limit: usize) -> Result<Vec<Email>, EmailError> {
+
+    fn fetch_emails_incrementally_plain(&self, folder: &str, metadata: &mut FolderMetadata) -> Result<Vec<Email>, EmailError> {
         let mut session = self.connect_imap_plain()?;
         
         session
             .select(folder)
             .map_err(|e| EmailError::ImapError(e.to_string()))?;
-        
-        let message_ids: Vec<u32> = session
-            .search("ALL")
-            .map_err(|e| EmailError::ImapError(e.to_string()))?
-            .into_iter()
-            .collect();
-        
-        let message_count = message_ids.len();
-        let start_idx = if message_count > limit {
-            message_count - limit
-        } else {
-            0
-        };
-        
-        if message_ids.is_empty() {
-            return Ok(Vec::new());
-        }
-        
-        let sequence = if start_idx < message_count {
-            format!("{}:*", message_ids[start_idx])
-        } else {
-            return Ok(Vec::new());
-        };
-        
-        let messages = session
-            .fetch(sequence, "(RFC822 FLAGS UID)")
+
+        // Get current folder status
+        let mailbox = session.examine(folder)
             .map_err(|e| EmailError::ImapError(e.to_string()))?;
         
-        self.parse_messages(&messages, folder)
+        let current_total = mailbox.exists;
+        debug_log(&format!("Folder '{}' has {} total messages, we have {} cached", 
+            folder, current_total, metadata.downloaded_uids.len()));
+
+        // First time sync - fetch recent messages
+        if metadata.last_uid == 0 {
+            debug_log("First time sync - fetching recent messages");
+            let fetch_count = std::cmp::min(100, current_total); // Fetch last 100 messages initially
+            let start_seq = if current_total > fetch_count {
+                current_total - fetch_count + 1
+            } else {
+                1
+            };
+            
+            let sequence = format!("{}:{}", start_seq, current_total);
+            debug_log(&format!("Initial sync: fetching messages {}", sequence));
+            
+            let messages = session
+                .fetch(sequence, "(RFC822 FLAGS UID)")
+                .map_err(|e| EmailError::ImapError(e.to_string()))?;
+
+            debug_log(&format!("Initial sync: fetched {} messages", messages.len()));
+            
+            let new_emails = self.parse_messages(&messages, folder)?;
+            
+            // Update metadata with all fetched UIDs
+            for message in &messages {
+                if let Some(uid) = message.uid {
+                    metadata.downloaded_uids.insert(uid);
+                    if uid > metadata.last_uid {
+                        metadata.last_uid = uid;
+                    }
+                }
+            }
+            metadata.total_messages = current_total;
+            
+            return Ok(new_emails);
+        }
+
+        // Incremental sync - fetch only new messages
+        if current_total <= metadata.total_messages {
+            debug_log("No new messages to fetch");
+            return Ok(Vec::new());
+        }
+
+        let start_uid = metadata.last_uid + 1;
+        debug_log(&format!("Incremental sync: fetching messages with UID >= {}", start_uid));
+
+        // Use UID FETCH to get only new messages
+        let sequence = format!("{}:*", start_uid);
+        let messages = session
+            .uid_fetch(sequence, "(RFC822 FLAGS UID)")
+            .map_err(|e| EmailError::ImapError(e.to_string()))?;
+
+        debug_log(&format!("Incremental sync: fetched {} new messages", messages.len()));
+
+        let new_emails = self.parse_messages(&messages, folder)?;
+        
+        // Update metadata with new UIDs
+        for message in &messages {
+            if let Some(uid) = message.uid {
+                metadata.downloaded_uids.insert(uid);
+                if uid > metadata.last_uid {
+                    metadata.last_uid = uid;
+                }
+            }
+        }
+        metadata.total_messages = current_total;
+
+        Ok(new_emails)
     }
     
     fn parse_messages(&self, messages: &[imap::types::Fetch], folder: &str) -> Result<Vec<Email>, EmailError> {
