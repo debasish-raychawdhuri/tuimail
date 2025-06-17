@@ -665,6 +665,11 @@ impl App {
                 self.should_quit = true;
                 Ok(())
             }
+            KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                // Test file browser
+                self.test_file_browser()?;
+                Ok(())
+            }
             KeyCode::Char('c') => {
                 self.mode = AppMode::Compose;
                 self.focus = FocusPanel::ComposeForm;
@@ -672,6 +677,11 @@ impl App {
                 self.compose_field = ComposeField::To;
                 self.compose_cursor_pos = 0;
                 self.compose_to_text = String::new();
+                Ok(())
+            }
+            KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                // Test file browser
+                self.test_file_browser()?;
                 Ok(())
             }
             KeyCode::Char('r') => {
@@ -749,6 +759,7 @@ impl App {
     fn handle_compose_mode(&mut self, key: KeyEvent) -> AppResult<()> {
         // Handle file browser mode separately
         if self.file_browser_mode {
+            println!("DEBUG: Routing to file browser input handler");
             return self.handle_file_browser_input(key);
         }
         
@@ -1538,6 +1549,7 @@ impl App {
 
     /// Handle key input when in file browser mode
     fn handle_file_browser_input(&mut self, key: KeyEvent) -> AppResult<()> {
+        println!("DEBUG: File browser input: {:?}", key);
         match key.code {
             KeyCode::Esc => {
                 // Exit file browser
@@ -1676,6 +1688,9 @@ impl App {
                 }
                 
                 println!("DEBUG: Found {} items in directory", items.len());
+                for (i, item) in items.iter().enumerate() {
+                    println!("DEBUG: Item {}: {} ({})", i, item.name, if item.is_directory { "dir" } else { "file" });
+                }
                 
                 // Sort: directories first, then files, both alphabetically
                 items.sort_by(|a, b| {
@@ -1774,7 +1789,23 @@ impl App {
         }
     }
     
-    /// Get the currently selected email
+    /// Test file browser functionality
+    pub fn test_file_browser(&mut self) -> AppResult<()> {
+        println!("DEBUG: Testing file browser");
+        
+        // Set up test save data
+        self.file_browser_save_mode = true;
+        self.file_browser_save_filename = "test_attachment.txt".to_string();
+        self.file_browser_save_data = b"Test attachment data".to_vec();
+        
+        // Enter file browser mode
+        self.file_browser_mode = true;
+        self.load_file_browser_directory()?;
+        self.file_browser_selected = 0;
+        self.show_info("TEST: File browser opened - try arrow keys and 'q' to save");
+        
+        Ok(())
+    }
     fn get_current_email(&self) -> Option<&Email> {
         if let Some(email_idx) = self.selected_email_idx {
             if email_idx < self.emails.len() {
