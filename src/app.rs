@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Local};
@@ -125,6 +126,21 @@ pub struct App {
 
 impl App {
     pub fn new(config: Config) -> Self {
+        // Debug logging
+        if std::env::var("EMAIL_DEBUG").is_ok() {
+            let log_file = "/tmp/email_client_debug.log";
+            if let Ok(mut file) = std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .append(true)
+                .open(log_file) 
+            {
+                use std::io::Write;
+                let _ = writeln!(file, "[{}] App::new() called with {} accounts", 
+                    chrono::Local::now().format("%Y-%m-%d %H:%M:%S"), config.accounts.len());
+            }
+        }
+        
         let credentials = SecureCredentials::new()
             .expect("Failed to initialize secure credential storage");
         
@@ -154,6 +170,21 @@ impl App {
         }
         
         let current_account_idx = config.default_account;
+        
+        // Debug logging
+        if std::env::var("EMAIL_DEBUG").is_ok() {
+            let log_file = "/tmp/email_client_debug.log";
+            if let Ok(mut file) = std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .append(true)
+                .open(log_file) 
+            {
+                use std::io::Write;
+                let _ = writeln!(file, "[{}] App::new() completed, default account: {}", 
+                    chrono::Local::now().format("%Y-%m-%d %H:%M:%S"), current_account_idx);
+            }
+        }
             
         Self {
             config,
@@ -282,13 +313,43 @@ impl App {
     
     /// Initialize a specific account (create email client, load folders)
     pub fn init_account(&mut self, account_idx: usize) -> AppResult<()> {
+        // Debug logging
+        if std::env::var("EMAIL_DEBUG").is_ok() {
+            let log_file = "/tmp/email_client_debug.log";
+            if let Ok(mut file) = std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .append(true)
+                .open(log_file) 
+            {
+                use std::io::Write;
+                let _ = writeln!(file, "[{}] Initializing account index: {}", 
+                    chrono::Local::now().format("%Y-%m-%d %H:%M:%S"), account_idx);
+            }
+        }
+        
         if account_idx >= self.config.accounts.len() {
             return Err(AppError::EmailError(crate::email::EmailError::ImapError(
-                "Invalid account index".to_string()
+                format!("Invalid account index: {} >= {}", account_idx, self.config.accounts.len())
             )));
         }
         
         let account_config = &self.config.accounts[account_idx];
+        
+        // Debug logging
+        if std::env::var("EMAIL_DEBUG").is_ok() {
+            let log_file = "/tmp/email_client_debug.log";
+            if let Ok(mut file) = std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .append(true)
+                .open(log_file) 
+            {
+                use std::io::Write;
+                let _ = writeln!(file, "[{}] Creating EmailClient for: {}", 
+                    chrono::Local::now().format("%Y-%m-%d %H:%M:%S"), account_config.email);
+            }
+        }
         
         // Create email client for this account
         let client = EmailClient::new(
@@ -308,15 +369,60 @@ impl App {
     
     /// Load folders for a specific account
     pub fn load_folders_for_account(&mut self, account_idx: usize) -> AppResult<()> {
+        // Debug logging
+        if std::env::var("EMAIL_DEBUG").is_ok() {
+            let log_file = "/tmp/email_client_debug.log";
+            if let Ok(mut file) = std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .append(true)
+                .open(log_file) 
+            {
+                use std::io::Write;
+                let _ = writeln!(file, "[{}] Loading folders for account: {}", 
+                    chrono::Local::now().format("%Y-%m-%d %H:%M:%S"), account_idx);
+            }
+        }
+        
         if let Some(account_data) = self.accounts.get_mut(&account_idx) {
             if let Some(client) = &account_data.email_client {
                 match client.list_folders() {
                     Ok(folders) => {
+                        // Debug logging
+                        if std::env::var("EMAIL_DEBUG").is_ok() {
+                            let log_file = "/tmp/email_client_debug.log";
+                            if let Ok(mut file) = std::fs::OpenOptions::new()
+                                .create(true)
+                                .write(true)
+                                .append(true)
+                                .open(log_file) 
+                            {
+                                use std::io::Write;
+                                let _ = writeln!(file, "[{}] Found {} folders for account {}", 
+                                    chrono::Local::now().format("%Y-%m-%d %H:%M:%S"), folders.len(), account_idx);
+                            }
+                        }
+                        
                         account_data.folders = folders;
                         self.rebuild_folder_items();
                         Ok(())
                     }
                     Err(e) => {
+                        // Debug logging
+                        if std::env::var("EMAIL_DEBUG").is_ok() {
+                            let log_file = "/tmp/email_client_debug.log";
+                            if let Ok(mut file) = std::fs::OpenOptions::new()
+                                .create(true)
+                                .write(true)
+                                .append(true)
+                                .open(log_file) 
+                            {
+                                use std::io::Write;
+                                let _ = writeln!(file, "[{}] Error loading folders for account {}: {}", 
+                                    chrono::Local::now().format("%Y-%m-%d %H:%M:%S"), account_idx, e);
+                            }
+                        }
+                        
                         self.show_error(&format!("Failed to load folders for account {}: {}", account_idx, e));
                         Err(AppError::EmailError(e))
                     }
@@ -400,7 +506,7 @@ impl App {
             {
                 use std::io::Write;
                 let _ = writeln!(file, "[{}] App::init() called", 
-                    Local::now().format("%Y-%m-%d %H:%M:%S"));
+                    chrono::Local::now().format("%Y-%m-%d %H:%M:%S"));
             }
         }
         
@@ -411,14 +517,56 @@ impl App {
             ));
         }
         
-        // Initialize the current account
-        self.init_account(self.current_account_idx)?;
+        // Initialize the current account only (don't initialize all accounts at startup)
+        match self.init_account(self.current_account_idx) {
+            Ok(()) => {
+                // Debug logging
+                if std::env::var("EMAIL_DEBUG").is_ok() {
+                    let log_file = "/tmp/email_client_debug.log";
+                    if let Ok(mut file) = std::fs::OpenOptions::new()
+                        .create(true)
+                        .write(true)
+                        .append(true)
+                        .open(log_file) 
+                    {
+                        use std::io::Write;
+                        let _ = writeln!(file, "[{}] Successfully initialized account {}", 
+                            chrono::Local::now().format("%Y-%m-%d %H:%M:%S"), self.current_account_idx);
+                    }
+                }
+            }
+            Err(e) => {
+                // Show error but don't fail completely - allow user to switch accounts
+                self.show_error(&format!("Failed to initialize default account: {}", e));
+                
+                // Debug logging
+                if std::env::var("EMAIL_DEBUG").is_ok() {
+                    let log_file = "/tmp/email_client_debug.log";
+                    if let Ok(mut file) = std::fs::OpenOptions::new()
+                        .create(true)
+                        .write(true)
+                        .append(true)
+                        .open(log_file) 
+                    {
+                        use std::io::Write;
+                        let _ = writeln!(file, "[{}] Failed to initialize account {}: {}", 
+                            chrono::Local::now().format("%Y-%m-%d %H:%M:%S"), self.current_account_idx, e);
+                    }
+                }
+                
+                // Continue with default folder structure
+                self.rebuild_folder_items();
+                return Ok(()); // Don't fail completely
+            }
+        }
         
         // Load emails for the first folder of the current account
         if let Some(account_data) = self.accounts.get(&self.current_account_idx) {
             if !account_data.folders.is_empty() {
                 let folder = account_data.folders[0].clone();
-                self.load_emails_for_account_folder(self.current_account_idx, &folder)?;
+                if let Err(e) = self.load_emails_for_account_folder(self.current_account_idx, &folder) {
+                    self.show_error(&format!("Failed to load emails: {}", e));
+                }
             }
         }
         
