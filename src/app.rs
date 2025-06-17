@@ -1,5 +1,6 @@
 use std::time::{Duration, Instant};
 
+use chrono::{DateTime, Local};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tokio::sync::mpsc;
 use thiserror::Error;
@@ -64,6 +65,9 @@ pub struct App {
     pub email_scroll_offset: usize,
     pub folder_scroll_offset: usize,
     pub email_view_scroll: usize,
+    // Sync status
+    pub last_sync: Option<DateTime<Local>>,
+    pub is_syncing: bool,
     // Compose form state
     pub compose_field: ComposeField,
 }
@@ -90,6 +94,8 @@ impl App {
             email_scroll_offset: 0,
             folder_scroll_offset: 0,
             email_view_scroll: 0,
+            last_sync: None,
+            is_syncing: false,
             compose_field: ComposeField::To,
         }
     }
@@ -167,21 +173,39 @@ impl App {
     }
     
     pub fn load_emails(&mut self) -> AppResult<()> {
-        if let Some(client) = &self.email_client {
-            let folder = &self.folders[self.selected_folder_idx];
-            match client.fetch_emails(folder, 50) {
-                Ok(emails) => {
-                    self.emails = emails;
-                    Ok(())
-                }
-                Err(e) => {
-                    self.show_error(&format!("Failed to load emails: {}", e));
-                    Err(AppError::EmailError(e))
-                }
+        let folder = self.folders[self.selected_folder_idx].clone();
+        
+        // Clone the client to avoid borrowing issues
+        let client = match &self.email_client {
+            Some(client) => client.clone(),
+            None => {
+                self.show_error("Email client not initialized");
+                return Ok(());
             }
-        } else {
-            self.show_error("Email client not initialized");
-            Ok(())
+        };
+        
+        // Show syncing status
+        self.is_syncing = true;
+        self.show_info(&format!("Syncing {}...", folder));
+        
+        match client.fetch_emails(&folder, 50) {
+            Ok(emails) => {
+                self.emails = emails;
+                self.selected_email_idx = if self.emails.is_empty() { None } else { Some(0) };
+                self.last_sync = Some(Local::now());
+                self.is_syncing = false;
+                
+                // Show sync result
+                let sync_time = self.last_sync.unwrap().format("%H:%M:%S");
+                self.show_info(&format!("Synced {} - {} emails at {}", 
+                    folder, self.emails.len(), sync_time));
+                Ok(())
+            }
+            Err(e) => {
+                self.is_syncing = false;
+                self.show_error(&format!("Failed to sync {}: {}", folder, e));
+                Err(AppError::EmailError(e))
+            }
         }
     }
     
@@ -446,12 +470,20 @@ impl App {
             KeyCode::Up => {
                 if !self.folders.is_empty() && self.selected_folder_idx > 0 {
                     self.selected_folder_idx -= 1;
+                    // Auto-sync when switching folders
+                    if let Err(e) = self.load_emails() {
+                        self.show_error(&format!("Failed to load emails: {}", e));
+                    }
                 }
                 Ok(())
             }
             KeyCode::Down => {
                 if !self.folders.is_empty() && self.selected_folder_idx < self.folders.len().saturating_sub(1) {
                     self.selected_folder_idx += 1;
+                    // Auto-sync when switching folders
+                    if let Err(e) = self.load_emails() {
+                        self.show_error(&format!("Failed to load emails: {}", e));
+                    }
                 }
                 Ok(())
             }

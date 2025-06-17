@@ -395,10 +395,23 @@ fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
     // Show email count
     text.push_str(&format!("Emails: {} | ", app.emails.len()));
     
-    // Show current mode
-    text.push_str(&format!("Mode: {:?}", app.mode));
+    // Show sync status
+    if app.is_syncing {
+        text.push_str("Syncing... | ");
+    } else if let Some(last_sync) = app.last_sync {
+        text.push_str(&format!("Last sync: {} | ", last_sync.format("%H:%M:%S")));
+    }
     
-    // Show error or info message if present
+    // Show current mode and help
+    match app.mode {
+        AppMode::Normal => text.push_str("Press 'r' to refresh, 'f' for folders, 'c' to compose, '?' for help"),
+        AppMode::FolderList => text.push_str("Use ↑↓ to navigate folders, Enter to select, Esc to cancel"),
+        AppMode::Compose => text.push_str("Tab to switch fields, Ctrl+S to send, Esc to cancel"),
+        AppMode::ViewEmail => text.push_str("↑↓ to scroll, Esc to go back"),
+        _ => text.push_str(&format!("Mode: {:?}", app.mode)),
+    }
+    
+    // Show error or info message if present (override other text)
     if let Some(error) = &app.error_message {
         text = format!("ERROR: {}", error);
     } else if let Some(info) = &app.info_message {
