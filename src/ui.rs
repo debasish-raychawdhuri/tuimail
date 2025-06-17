@@ -240,10 +240,17 @@ fn render_compose_mode(f: &mut Frame, app: &App, area: Rect) {
         .split(area);
     
     // Render compose form header with field highlighting
-    let to = app.compose_email.to.iter()
-        .map(|addr| addr.address.clone())
-        .collect::<Vec<_>>()
-        .join(", ");
+    let to_display = if app.compose_field == crate::app::ComposeField::To {
+        // Show cursor in To field when active
+        let cursor_pos = app.compose_cursor_pos.min(app.compose_to_text.len());
+        let mut display_text = app.compose_to_text.clone();
+        if cursor_pos <= display_text.len() {
+            display_text.insert(cursor_pos, '│'); // Vertical bar as cursor
+        }
+        display_text
+    } else {
+        app.compose_to_text.clone()
+    };
     
     let to_style = if app.compose_field == crate::app::ComposeField::To {
         Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
@@ -261,7 +268,7 @@ fn render_compose_mode(f: &mut Frame, app: &App, area: Rect) {
         Line::from(""),
         Line::from(vec![
             Span::styled("To: ", to_style),
-            Span::raw(&to),
+            Span::raw(&to_display),
         ]),
         Line::from(""),
         Line::from(vec![

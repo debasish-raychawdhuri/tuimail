@@ -114,6 +114,7 @@ pub struct App {
     // Compose form state
     pub compose_field: ComposeField,
     pub compose_cursor_pos: usize, // Cursor position in the current field
+    pub compose_to_text: String,   // Raw text for To field editing
 }
 
 impl App {
@@ -207,6 +208,7 @@ impl App {
             is_syncing: false,
             compose_field: ComposeField::To,
             compose_cursor_pos: 0,
+            compose_to_text: String::new(),
         }
     }
     
@@ -637,6 +639,7 @@ impl App {
                 self.compose_email = Email::new();
                 self.compose_field = ComposeField::To;
                 self.compose_cursor_pos = 0;
+                self.compose_to_text = String::new();
                 Ok(())
             }
             KeyCode::Char('r') => {
@@ -722,10 +725,12 @@ impl App {
                     ComposeField::Subject => ComposeField::Body,
                     ComposeField::Body => ComposeField::To,
                 };
-                // Reset cursor position when entering body field
-                if self.compose_field == ComposeField::Body {
-                    self.compose_cursor_pos = 0;
-                }
+                // Reset cursor position when switching fields
+                self.compose_cursor_pos = match self.compose_field {
+                    ComposeField::To => self.compose_to_text.len(), // End of To field
+                    ComposeField::Subject => self.compose_email.subject.len(), // End of Subject
+                    ComposeField::Body => 0, // Beginning of Body for replies
+                };
                 Ok(())
             }
             KeyCode::BackTab => {
@@ -735,10 +740,12 @@ impl App {
                     ComposeField::Subject => ComposeField::To,
                     ComposeField::Body => ComposeField::Subject,
                 };
-                // Reset cursor position when entering body field
-                if self.compose_field == ComposeField::Body {
-                    self.compose_cursor_pos = 0;
-                }
+                // Reset cursor position when switching fields
+                self.compose_cursor_pos = match self.compose_field {
+                    ComposeField::To => self.compose_to_text.len(), // End of To field
+                    ComposeField::Subject => self.compose_email.subject.len(), // End of Subject
+                    ComposeField::Body => 0, // Beginning of Body for replies
+                };
                 Ok(())
             }
             KeyCode::Up => {
@@ -748,10 +755,12 @@ impl App {
                     ComposeField::Subject => ComposeField::To,
                     ComposeField::Body => ComposeField::Subject,
                 };
-                // Reset cursor position when entering body field
-                if self.compose_field == ComposeField::Body {
-                    self.compose_cursor_pos = 0;
-                }
+                // Reset cursor position when switching fields
+                self.compose_cursor_pos = match self.compose_field {
+                    ComposeField::To => self.compose_to_text.len(), // End of To field
+                    ComposeField::Subject => self.compose_email.subject.len(), // End of Subject
+                    ComposeField::Body => 0, // Beginning of Body for replies
+                };
                 Ok(())
             }
             KeyCode::Down => {
@@ -761,10 +770,12 @@ impl App {
                     ComposeField::Subject => ComposeField::Body,
                     ComposeField::Body => ComposeField::To,
                 };
-                // Reset cursor position when entering body field
-                if self.compose_field == ComposeField::Body {
-                    self.compose_cursor_pos = 0;
-                }
+                // Reset cursor position when switching fields
+                self.compose_cursor_pos = match self.compose_field {
+                    ComposeField::To => self.compose_to_text.len(), // End of To field
+                    ComposeField::Subject => self.compose_email.subject.len(), // End of Subject
+                    ComposeField::Body => 0, // Beginning of Body for replies
+                };
                 Ok(())
             }
             KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -775,15 +786,18 @@ impl App {
                 // Add character to current field at cursor position
                 match self.compose_field {
                     ComposeField::To => {
-                        let to_string = self.compose_email.to.iter()
-                            .map(|addr| addr.address.clone())
-                            .collect::<Vec<_>>()
-                            .join(", ");
-                        let new_to = format!("{}{}", to_string, c);
+                        // Insert character at cursor position in To field
+                        if self.compose_cursor_pos <= self.compose_to_text.len() {
+                            self.compose_to_text.insert(self.compose_cursor_pos, c);
+                            self.compose_cursor_pos += 1;
+                        } else {
+                            self.compose_to_text.push(c);
+                            self.compose_cursor_pos = self.compose_to_text.len();
+                        }
                         
-                        // Parse the to field
+                        // Parse the to field and update compose_email.to
                         self.compose_email.to.clear();
-                        for addr in new_to.split(',') {
+                        for addr in self.compose_to_text.split(',') {
                             let addr = addr.trim();
                             if !addr.is_empty() {
                                 self.compose_email.to.push(crate::email::EmailAddress {
@@ -818,11 +832,19 @@ impl App {
                 // Remove character from current field at cursor position
                 match self.compose_field {
                     ComposeField::To => {
-                        if let Some(last_addr) = self.compose_email.to.last_mut() {
-                            if !last_addr.address.is_empty() {
-                                last_addr.address.pop();
-                                if last_addr.address.is_empty() {
-                                    self.compose_email.to.pop();
+                        if self.compose_cursor_pos > 0 && self.compose_cursor_pos <= self.compose_to_text.len() {
+                            self.compose_to_text.remove(self.compose_cursor_pos - 1);
+                            self.compose_cursor_pos -= 1;
+                            
+                            // Parse the to field and update compose_email.to
+                            self.compose_email.to.clear();
+                            for addr in self.compose_to_text.split(',') {
+                                let addr = addr.trim();
+                                if !addr.is_empty() {
+                                    self.compose_email.to.push(crate::email::EmailAddress {
+                                        name: None,
+                                        address: addr.to_string(),
+                                    });
                                 }
                             }
                         }
@@ -860,20 +882,38 @@ impl App {
                 Ok(())
             }
             KeyCode::Left => {
-                // Move cursor left in body field
-                if self.compose_field == ComposeField::Body && self.compose_cursor_pos > 0 {
-                    self.compose_cursor_pos -= 1;
+                // Move cursor left in current field
+                match self.compose_field {
+                    ComposeField::To => {
+                        if self.compose_cursor_pos > 0 {
+                            self.compose_cursor_pos -= 1;
+                        }
+                    }
+                    ComposeField::Body => {
+                        if self.compose_cursor_pos > 0 {
+                            self.compose_cursor_pos -= 1;
+                        }
+                    }
+                    _ => {}
                 }
                 Ok(())
             }
             KeyCode::Right => {
-                // Move cursor right in body field
-                if self.compose_field == ComposeField::Body {
-                    if let Some(body) = &self.compose_email.body_text {
-                        if self.compose_cursor_pos < body.len() {
+                // Move cursor right in current field
+                match self.compose_field {
+                    ComposeField::To => {
+                        if self.compose_cursor_pos < self.compose_to_text.len() {
                             self.compose_cursor_pos += 1;
                         }
                     }
+                    ComposeField::Body => {
+                        if let Some(body) = &self.compose_email.body_text {
+                            if self.compose_cursor_pos < body.len() {
+                                self.compose_cursor_pos += 1;
+                            }
+                        }
+                    }
+                    _ => {}
                 }
                 Ok(())
             }
@@ -1142,7 +1182,14 @@ impl App {
                 reply.body_text = Some("\n\n\n\n".to_string());
             }
             
+            // Set compose_to_text before moving reply
+            let to_text = reply.to.iter()
+                .map(|addr| addr.address.clone())
+                .collect::<Vec<_>>()
+                .join(", ");
+            
             self.compose_email = reply;
+            self.compose_to_text = to_text;
             self.mode = AppMode::Compose;
             self.focus = FocusPanel::ComposeForm;
             self.compose_field = ComposeField::Body;
@@ -1244,7 +1291,14 @@ impl App {
                 reply.body_text = Some("\n\n\n\n".to_string());
             }
             
+            // Set compose_to_text before moving reply
+            let to_text = reply.to.iter()
+                .map(|addr| addr.address.clone())
+                .collect::<Vec<_>>()
+                .join(", ");
+            
             self.compose_email = reply;
+            self.compose_to_text = to_text;
             self.mode = AppMode::Compose;
             self.focus = FocusPanel::ComposeForm;
             self.compose_field = ComposeField::Body;
@@ -1342,6 +1396,7 @@ impl App {
             forward.attachments = original.attachments.clone();
             
             self.compose_email = forward;
+            self.compose_to_text = String::new(); // Forward starts with empty To field
             self.mode = AppMode::Compose;
             self.focus = FocusPanel::ComposeForm;
             self.compose_field = ComposeField::To; // Start in To field for forward
