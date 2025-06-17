@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::fs;
 
 use anyhow::Result;
 use chrono::{DateTime, Local, Utc};
@@ -10,8 +11,55 @@ use lettre::{Address, Message, SmtpTransport, Transport};
 use native_tls::{TlsConnector, TlsStream};
 use thiserror::Error;
 use tokio::sync::mpsc;
+use serde::{Serialize, Deserialize};
 
 use crate::config::{EmailAccount, ImapSecurity, SmtpSecurity};
+
+// Helper function to parse email addresses from header values
+fn parse_email_addresses(value: &str) -> Vec<EmailAddress> {
+    let mut addresses = Vec::new();
+    
+    // Handle multiple addresses separated by commas
+    for addr_part in value.split(',') {
+        let addr_part = addr_part.trim();
+        if addr_part.is_empty() {
+            continue;
+        }
+        
+        // Handle different formats:
+        // 1. "Name" <email@domain.com>
+        // 2. Name <email@domain.com>
+        // 3. <email@domain.com>
+        // 4. email@domain.com
+        
+        if let Some(addr_start) = addr_part.find('<') {
+            if let Some(addr_end) = addr_part.find('>') {
+                let email_addr = &addr_part[addr_start + 1..addr_end];
+                let name_part = addr_part[..addr_start].trim();
+                
+                // Remove quotes from name if present
+                let clean_name = if name_part.starts_with('"') && name_part.ends_with('"') {
+                    &name_part[1..name_part.len()-1]
+                } else {
+                    name_part
+                };
+                
+                addresses.push(EmailAddress {
+                    name: if clean_name.is_empty() { None } else { Some(clean_name.to_string()) },
+                    address: email_addr.to_string(),
+                });
+            }
+        } else {
+            // No angle brackets, assume the whole thing is an email
+            addresses.push(EmailAddress {
+                name: None,
+                address: addr_part.to_string(),
+            });
+        }
+    }
+    
+    addresses
+}
 
 #[derive(Error, Debug)]
 pub enum EmailError {
@@ -31,7 +79,7 @@ pub enum EmailError {
     IoError(#[from] std::io::Error),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmailAddress {
     pub name: Option<String>,
     pub address: String,
@@ -60,14 +108,15 @@ impl From<EmailAddress> for Mailbox {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmailAttachment {
     pub filename: String,
     pub content_type: String,
+    #[serde(with = "serde_bytes")]
     pub data: Vec<u8>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Email {
     pub id: String,
     pub subject: String,
@@ -75,6 +124,7 @@ pub struct Email {
     pub to: Vec<EmailAddress>,
     pub cc: Vec<EmailAddress>,
     pub bcc: Vec<EmailAddress>,
+    #[serde(with = "local_datetime_serde")]
     pub date: DateTime<Local>,
     pub body_text: Option<String>,
     pub body_html: Option<String>,
@@ -83,6 +133,27 @@ pub struct Email {
     pub headers: HashMap<String, String>,
     pub seen: bool,
     pub folder: String,
+}
+
+// Custom serialization for DateTime<Local>
+mod local_datetime_serde {
+    use chrono::{DateTime, Local, TimeZone};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S>(dt: &DateTime<Local>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        dt.timestamp().serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<DateTime<Local>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let timestamp = i64::deserialize(deserializer)?;
+        Ok(Local.timestamp_opt(timestamp, 0).single().unwrap_or_else(|| Local::now()))
+    }
 }
 
 impl Email {
@@ -144,65 +215,19 @@ impl Email {
                 // Parse basic from/to information from headers
                 match name.to_lowercase().as_str() {
                     "from" => {
-                        // Simple parsing - just extract email addresses
-                        if let Some(addr_start) = value.find('<') {
-                            if let Some(addr_end) = value.find('>') {
-                                let addr = &value[addr_start + 1..addr_end];
-                                let name_part = value[..addr_start].trim();
-                                email.from.push(EmailAddress {
-                                    name: if name_part.is_empty() { None } else { Some(name_part.to_string()) },
-                                    address: addr.to_string(),
-                                });
-                            }
-                        } else {
-                            // No angle brackets, assume the whole thing is an email
-                            email.from.push(EmailAddress {
-                                name: None,
-                                address: value.trim().to_string(),
-                            });
-                        }
+                        // Parse from addresses - handle multiple formats
+                        let addresses = parse_email_addresses(value);
+                        email.from.extend(addresses);
                     }
                     "to" => {
-                        // Simple parsing for to addresses
-                        for addr_part in value.split(',') {
-                            let addr_part = addr_part.trim();
-                            if let Some(addr_start) = addr_part.find('<') {
-                                if let Some(addr_end) = addr_part.find('>') {
-                                    let addr = &addr_part[addr_start + 1..addr_end];
-                                    let name_part = addr_part[..addr_start].trim();
-                                    email.to.push(EmailAddress {
-                                        name: if name_part.is_empty() { None } else { Some(name_part.to_string()) },
-                                        address: addr.to_string(),
-                                    });
-                                }
-                            } else {
-                                email.to.push(EmailAddress {
-                                    name: None,
-                                    address: addr_part.to_string(),
-                                });
-                            }
-                        }
+                        // Parse to addresses
+                        let addresses = parse_email_addresses(value);
+                        email.to.extend(addresses);
                     }
                     "cc" => {
-                        // Simple parsing for cc addresses
-                        for addr_part in value.split(',') {
-                            let addr_part = addr_part.trim();
-                            if let Some(addr_start) = addr_part.find('<') {
-                                if let Some(addr_end) = addr_part.find('>') {
-                                    let addr = &addr_part[addr_start + 1..addr_end];
-                                    let name_part = addr_part[..addr_start].trim();
-                                    email.cc.push(EmailAddress {
-                                        name: if name_part.is_empty() { None } else { Some(name_part.to_string()) },
-                                        address: addr.to_string(),
-                                    });
-                                }
-                            } else {
-                                email.cc.push(EmailAddress {
-                                    name: None,
-                                    address: addr_part.to_string(),
-                                });
-                            }
-                        }
+                        // Parse cc addresses
+                        let addresses = parse_email_addresses(value);
+                        email.cc.extend(addresses);
                     }
                     _ => {}
                 }
@@ -216,11 +241,64 @@ impl Email {
 #[derive(Clone)]
 pub struct EmailClient {
     account: EmailAccount,
+    cache_dir: String,
 }
 
 impl EmailClient {
     pub fn new(account: EmailAccount) -> Self {
-        Self { account }
+        let cache_dir = format!("{}/.cache/email_client/{}", 
+            dirs::home_dir().unwrap_or_default().display(), 
+            account.email.replace('@', "_at_").replace('.', "_"));
+        
+        // Create cache directory if it doesn't exist
+        if let Err(e) = fs::create_dir_all(&cache_dir) {
+            eprintln!("Warning: Could not create cache directory {}: {}", cache_dir, e);
+        }
+        
+        Self { account, cache_dir }
+    }
+    
+    fn get_cache_file(&self, folder: &str) -> String {
+        format!("{}/{}.json", self.cache_dir, folder.replace('/', "_"))
+    }
+    
+    fn load_cached_emails(&self, folder: &str) -> Vec<Email> {
+        let cache_file = self.get_cache_file(folder);
+        if let Ok(content) = fs::read_to_string(&cache_file) {
+            if let Ok(emails) = serde_json::from_str::<Vec<Email>>(&content) {
+                return emails;
+            }
+        }
+        Vec::new()
+    }
+    
+    fn save_cached_emails(&self, folder: &str, emails: &[Email]) {
+        let cache_file = self.get_cache_file(folder);
+        if let Ok(content) = serde_json::to_string_pretty(emails) {
+            if let Err(e) = fs::write(&cache_file, content) {
+                eprintln!("Warning: Could not save email cache: {}", e);
+            }
+        }
+    }
+    
+    fn merge_emails(&self, cached: Vec<Email>, new: Vec<Email>) -> Vec<Email> {
+        let mut email_map: HashMap<String, Email> = HashMap::new();
+        
+        // Add cached emails first
+        for email in cached {
+            email_map.insert(email.id.clone(), email);
+        }
+        
+        // Add/update with new emails
+        for email in new {
+            email_map.insert(email.id.clone(), email);
+        }
+        
+        // Convert back to vector and sort by date
+        let mut emails: Vec<Email> = email_map.into_values().collect();
+        emails.sort_by(|a, b| b.date.cmp(&a.date));
+        
+        emails
     }
     
     fn connect_imap_secure(&self) -> Result<Session<TlsStream<std::net::TcpStream>>, EmailError> {
@@ -289,17 +367,44 @@ impl EmailClient {
     }
     
     pub fn fetch_emails(&self, folder: &str, limit: usize) -> Result<Vec<Email>, EmailError> {
-        match self.account.imap_security {
+        // Load cached emails first
+        let cached_emails = self.load_cached_emails(folder);
+        
+        // Fetch new emails from server
+        let new_emails = match self.account.imap_security {
             ImapSecurity::SSL | ImapSecurity::StartTLS => {
-                self.fetch_emails_secure(folder, limit)
+                self.fetch_emails_from_server_secure(folder, limit)
             }
             ImapSecurity::None => {
-                self.fetch_emails_plain(folder, limit)
+                self.fetch_emails_from_server_plain(folder, limit)
+            }
+        };
+        
+        match new_emails {
+            Ok(new) => {
+                // Merge cached and new emails
+                let merged = self.merge_emails(cached_emails, new);
+                
+                // Save updated cache
+                self.save_cached_emails(folder, &merged);
+                
+                // Return limited number for display, but keep all in cache
+                let display_limit = std::cmp::min(limit * 3, merged.len()); // Show more than requested
+                Ok(merged.into_iter().take(display_limit).collect())
+            }
+            Err(e) => {
+                // If server fetch fails, return cached emails
+                if !cached_emails.is_empty() {
+                    eprintln!("Using cached emails due to server error: {}", e);
+                    Ok(cached_emails)
+                } else {
+                    Err(e)
+                }
             }
         }
     }
     
-    fn fetch_emails_secure(&self, folder: &str, limit: usize) -> Result<Vec<Email>, EmailError> {
+    fn fetch_emails_from_server_secure(&self, folder: &str, limit: usize) -> Result<Vec<Email>, EmailError> {
         let mut session = self.connect_imap_secure()?;
         
         session
@@ -336,7 +441,7 @@ impl EmailClient {
         self.parse_messages(&messages, folder)
     }
     
-    fn fetch_emails_plain(&self, folder: &str, limit: usize) -> Result<Vec<Email>, EmailError> {
+    fn fetch_emails_from_server_plain(&self, folder: &str, limit: usize) -> Result<Vec<Email>, EmailError> {
         let mut session = self.connect_imap_plain()?;
         
         session
