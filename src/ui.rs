@@ -106,7 +106,16 @@ fn render_email_list(f: &mut Frame, app: &App, area: Rect) {
             
             let date = email.date.format("%m-%d %H:%M").to_string();
             let from = email.from.first().map_or("Unknown", |addr| {
-                addr.name.as_deref().unwrap_or(&addr.address)
+                // Show name if available, otherwise show email address
+                if let Some(ref name) = addr.name {
+                    if !name.is_empty() {
+                        name
+                    } else {
+                        &addr.address
+                    }
+                } else {
+                    &addr.address
+                }
             });
             
             let content = format!("{:<12} {:<25} {}", date, from, email.subject);

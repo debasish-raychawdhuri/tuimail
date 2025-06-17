@@ -49,7 +49,7 @@ fn parse_email_addresses(value: &str) -> Vec<EmailAddress> {
                     address: email_addr.to_string(),
                 });
             }
-        } else {
+        } else if addr_part.contains('@') {
             // No angle brackets, assume the whole thing is an email
             addresses.push(EmailAddress {
                 name: None,
@@ -194,19 +194,7 @@ impl Email {
                 .with_timezone(&Local);
         }
         
-        // For now, just extract basic information without complex parsing
-        // This is a simplified approach that should work with the mail_parser API
-        
-        // Extract body parts
-        if let Some(text_body) = parsed.body_text(0) {
-            email.body_text = Some(text_body.to_string());
-        }
-        
-        if let Some(html_body) = parsed.body_html(0) {
-            email.body_html = Some(html_body.to_string());
-        }
-        
-        // Extract basic headers for from/to information
+        // Extract headers and parse addresses from them
         for header in parsed.headers() {
             let name = header.name().to_string();
             if let Some(value) = header.value().as_text_ref() {
@@ -215,23 +203,37 @@ impl Email {
                 // Parse basic from/to information from headers
                 match name.to_lowercase().as_str() {
                     "from" => {
-                        // Parse from addresses - handle multiple formats
                         let addresses = parse_email_addresses(value);
                         email.from.extend(addresses);
                     }
                     "to" => {
-                        // Parse to addresses
                         let addresses = parse_email_addresses(value);
                         email.to.extend(addresses);
                     }
                     "cc" => {
-                        // Parse cc addresses
                         let addresses = parse_email_addresses(value);
                         email.cc.extend(addresses);
                     }
                     _ => {}
                 }
             }
+        }
+        
+        // If we still don't have a from address, try to create one from the headers map
+        if email.from.is_empty() {
+            if let Some(from_value) = email.headers.get("From").or_else(|| email.headers.get("from")) {
+                let addresses = parse_email_addresses(from_value);
+                email.from.extend(addresses);
+            }
+        }
+        
+        // Extract body parts
+        if let Some(text_body) = parsed.body_text(0) {
+            email.body_text = Some(text_body.to_string());
+        }
+        
+        if let Some(html_body) = parsed.body_html(0) {
+            email.body_html = Some(html_body.to_string());
         }
         
         Ok(email)
@@ -491,15 +493,38 @@ impl EmailClient {
                     .map(|f| f.to_string())
                     .collect();
                 
+                // Debug: Print first few bytes of the email to see if we're getting data
+                if std::env::var("EMAIL_DEBUG").is_ok() {
+                    eprintln!("Parsing email UID {}, body length: {}", uid, body.len());
+                    if body.len() > 100 {
+                        eprintln!("First 200 chars: {}", String::from_utf8_lossy(&body[..200]));
+                    }
+                }
+                
                 match mail_parser::Message::parse(body) {
                     Some(parsed) => {
                         match Email::from_parsed_email(&parsed, &uid, folder, flags) {
-                            Ok(email) => emails.push(email),
+                            Ok(mut email) => {
+                                // Debug output if enabled
+                                if std::env::var("EMAIL_DEBUG").is_ok() {
+                                    eprintln!("Parsed email: subject='{}', from={:?}", email.subject, email.from);
+                                }
+                                
+                                // Fallback: if we still don't have from addresses, try to extract from raw headers
+                                if email.from.is_empty() {
+                                    if let Some(from_header) = email.headers.get("From").or_else(|| email.headers.get("from")) {
+                                        let addresses = parse_email_addresses(from_header);
+                                        email.from.extend(addresses);
+                                    }
+                                }
+                                
+                                emails.push(email);
+                            }
                             Err(e) => eprintln!("Error parsing email: {}", e),
                         }
                     }
                     None => {
-                        eprintln!("Failed to parse email");
+                        eprintln!("Failed to parse email with mail_parser");
                     }
                 }
             }
