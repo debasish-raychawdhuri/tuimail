@@ -448,8 +448,61 @@ impl App {
         }
     }
     
+    /// Initialize email client for a specific account if not already initialized
+    pub fn ensure_account_initialized(&mut self, account_idx: usize) -> AppResult<()> {
+        // Check if account exists and client is already initialized
+        if let Some(account_data) = self.accounts.get(&account_idx) {
+            if account_data.email_client.is_some() {
+                return Ok(()); // Already initialized
+            }
+        }
+        
+        // Initialize the account
+        if account_idx < self.config.accounts.len() {
+            let account = self.config.accounts[account_idx].clone();
+            
+            // Debug logging
+            if std::env::var("EMAIL_DEBUG").is_ok() {
+                let log_file = "/tmp/email_client_debug.log";
+                if let Ok(mut file) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .write(true)
+                    .append(true)
+                    .open(log_file) 
+                {
+                    use std::io::Write;
+                    let _ = writeln!(file, "[{}] Initializing account {}: {}", 
+                        chrono::Local::now().format("%Y-%m-%d %H:%M:%S"), 
+                        account_idx, account.email);
+                }
+            }
+            
+            // Create email client using the new signature
+            let client = EmailClient::new(account, self.credentials.clone());
+            
+            // Get folders for this account
+            let folders = client.list_folders().map_err(AppError::EmailError)?;
+            
+            // Create or update account data
+            let account_data = self.accounts.entry(account_idx).or_insert_with(AccountData::new);
+            account_data.email_client = Some(client);
+            account_data.folders = folders;
+            
+            let account_email = &self.config.accounts[account_idx].email;
+            self.show_info(&format!("Initialized account: {}", account_email));
+            Ok(())
+        } else {
+            Err(AppError::EmailError(crate::email::EmailError::ImapError(
+                "Account index out of range".to_string()
+            )))
+        }
+    }
+
     /// Load emails for a specific account and folder
     pub fn load_emails_for_account_folder(&mut self, account_idx: usize, folder: &str) -> AppResult<()> {
+        // Ensure the account is initialized
+        self.ensure_account_initialized(account_idx)?;
+        
         if let Some(account_data) = self.accounts.get_mut(&account_idx) {
             if let Some(client) = &account_data.email_client {
                 match client.fetch_emails(folder, 50) {
@@ -619,7 +672,9 @@ impl App {
                         self.mode = AppMode::ViewEmail;
                         
                         // Mark as read
-                        if let Some(account_data) = self.accounts.get(&self.current_account_idx) {
+                        if let Err(e) = self.ensure_account_initialized(self.current_account_idx) {
+                            self.show_error(&format!("Failed to initialize account: {}", e));
+                        } else if let Some(account_data) = self.accounts.get(&self.current_account_idx) {
                             if let Some(client) = &account_data.email_client {
                                 let email = &self.emails[idx];
                                 if !email.seen {
@@ -1023,12 +1078,16 @@ impl App {
                 return Ok(());
             }
             
-            let email = &self.emails[idx];
+            // Clone the email to avoid borrowing issues
+            let email = self.emails[idx].clone();
+            
+            // Ensure the current account is initialized
+            self.ensure_account_initialized(self.current_account_idx)?;
             
             // Get the current account's email client
             if let Some(account_data) = self.accounts.get(&self.current_account_idx) {
                 if let Some(client) = &account_data.email_client {
-                    match client.delete_email(email) {
+                    match client.delete_email(&email) {
                         Ok(_) => {
                             self.emails.remove(idx);
                             
@@ -1064,6 +1123,9 @@ impl App {
 
     /// Send the composed email using the current account
     pub fn send_email(&mut self) -> AppResult<()> {
+        // Ensure the current account is initialized
+        self.ensure_account_initialized(self.current_account_idx)?;
+        
         // Get the current account's email client
         if let Some(account_data) = self.accounts.get(&self.current_account_idx) {
             if let Some(client) = &account_data.email_client {
