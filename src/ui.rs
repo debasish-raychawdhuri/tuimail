@@ -400,8 +400,10 @@ fn render_help_mode(f: &mut Frame, _app: &App, area: Rect) {
         Line::from("View Email Mode:"),
         Line::from("  Esc - Return to email list"),
         Line::from("  r - Reply to email"),
+        Line::from("  a - Reply to all"),
         Line::from("  f - Forward email"),
         Line::from("  d - Delete email"),
+        Line::from("  ↑↓ - Scroll email content"),
         Line::from(""),
         Line::from("Compose Mode:"),
         Line::from("  Esc - Cancel"),
@@ -441,7 +443,7 @@ fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
         AppMode::Normal => text.push_str("Press 'r' to refresh, 'f' for folders, 'c' to compose, '?' for help"),
         AppMode::FolderList => text.push_str("Use ↑↓ to navigate folders, Enter to select, Esc to cancel"),
         AppMode::Compose => text.push_str("Tab to switch fields, Ctrl+S to send, Esc to cancel"),
-        AppMode::ViewEmail => text.push_str("↑↓ to scroll, Esc to go back"),
+        AppMode::ViewEmail => text.push_str("r=Reply, a=Reply All, f=Forward, d=Delete, ↑↓=Scroll, Esc=Back"),
         _ => text.push_str(&format!("Mode: {:?}", app.mode)),
     }
     

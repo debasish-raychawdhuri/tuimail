@@ -858,6 +858,10 @@ impl App {
                 self.reply_to_email()?;
                 Ok(())
             }
+            KeyCode::Char('a') => {
+                self.reply_all_to_email()?;
+                Ok(())
+            }
             KeyCode::Char('f') => {
                 self.forward_email()?;
                 Ok(())
@@ -997,20 +1001,54 @@ impl App {
             let original = &self.emails[idx];
             
             let mut reply = Email::new();
+            
+            // Set subject with Re: prefix
             reply.subject = if original.subject.starts_with("Re: ") {
                 original.subject.clone()
             } else {
                 format!("Re: {}", original.subject)
             };
             
-            // Set recipient to the original sender
-            reply.to = original.from.clone();
+            // Set recipient to the original sender (reply-to if present, otherwise from)
+            let reply_to_addrs = original.reply_to();
+            reply.to = if !reply_to_addrs.is_empty() {
+                reply_to_addrs
+            } else {
+                original.from.clone()
+            };
+            
+            // Set from field to current account
+            let current_account = &self.config.accounts[self.current_account_idx];
+            reply.from = vec![crate::email::EmailAddress {
+                name: Some(current_account.name.clone()),
+                address: current_account.email.clone(),
+            }];
+            
+            // Set In-Reply-To and References headers for proper threading
+            let original_msg_id = original.message_id();
+            if !original_msg_id.is_empty() {
+                reply.set_in_reply_to(original_msg_id.clone());
+                let mut refs = original.references();
+                refs.push(original_msg_id);
+                reply.set_references(refs);
+            }
             
             // Set body with quoted original
             if let Some(body) = &original.body_text {
+                let sender_name = if !original.from.is_empty() {
+                    if let Some(name) = &original.from[0].name {
+                        name.clone()
+                    } else {
+                        original.from[0].address.clone()
+                    }
+                } else {
+                    "Unknown".to_string()
+                };
+                
                 reply.body_text = Some(format!(
-                    "\n\nOn {} wrote:\n{}", 
+                    "\n\nOn {} {} wrote:\n{}", 
                     original.date.format("%Y-%m-%d %H:%M"),
+                    sender_name,
                     body.lines().map(|line| format!("> {}", line)).collect::<Vec<_>>().join("\n")
                 ));
             }
@@ -1018,8 +1056,107 @@ impl App {
             self.compose_email = reply;
             self.mode = AppMode::Compose;
             self.focus = FocusPanel::ComposeForm;
+            self.compose_field = ComposeField::Body; // Start in body field for reply
             
             self.show_info("Replying to email");
+        } else {
+            self.show_error("No email selected");
+        }
+        
+        Ok(())
+    }
+
+    pub fn reply_all_to_email(&mut self) -> AppResult<()> {
+        if let Some(idx) = self.selected_email_idx {
+            if idx >= self.emails.len() {
+                self.show_error("Invalid email selection");
+                return Ok(());
+            }
+            
+            let original = &self.emails[idx];
+            let current_account = &self.config.accounts[self.current_account_idx];
+            
+            let mut reply = Email::new();
+            
+            // Set subject with Re: prefix
+            reply.subject = if original.subject.starts_with("Re: ") {
+                original.subject.clone()
+            } else {
+                format!("Re: {}", original.subject)
+            };
+            
+            // Set from field to current account
+            reply.from = vec![crate::email::EmailAddress {
+                name: Some(current_account.name.clone()),
+                address: current_account.email.clone(),
+            }];
+            
+            // For reply-all, include original sender and all recipients except current user
+            let current_email = &current_account.email;
+            
+            // Add original sender (reply-to if present, otherwise from)
+            let reply_to_addrs = original.reply_to();
+            let original_sender = if !reply_to_addrs.is_empty() {
+                &reply_to_addrs
+            } else {
+                &original.from
+            };
+            
+            for addr in original_sender {
+                if addr.address != *current_email {
+                    reply.to.push(addr.clone());
+                }
+            }
+            
+            // Add all original TO recipients except current user
+            for addr in &original.to {
+                if addr.address != *current_email && !reply.to.iter().any(|existing| existing.address == addr.address) {
+                    reply.to.push(addr.clone());
+                }
+            }
+            
+            // Add all original CC recipients except current user to CC
+            for addr in &original.cc {
+                if addr.address != *current_email && !reply.cc.iter().any(|existing| existing.address == addr.address) {
+                    reply.cc.push(addr.clone());
+                }
+            }
+            
+            // Set In-Reply-To and References headers for proper threading
+            let original_msg_id = original.message_id();
+            if !original_msg_id.is_empty() {
+                reply.set_in_reply_to(original_msg_id.clone());
+                let mut refs = original.references();
+                refs.push(original_msg_id);
+                reply.set_references(refs);
+            }
+            
+            // Set body with quoted original
+            if let Some(body) = &original.body_text {
+                let sender_name = if !original.from.is_empty() {
+                    if let Some(name) = &original.from[0].name {
+                        name.clone()
+                    } else {
+                        original.from[0].address.clone()
+                    }
+                } else {
+                    "Unknown".to_string()
+                };
+                
+                reply.body_text = Some(format!(
+                    "\n\nOn {} {} wrote:\n{}", 
+                    original.date.format("%Y-%m-%d %H:%M"),
+                    sender_name,
+                    body.lines().map(|line| format!("> {}", line)).collect::<Vec<_>>().join("\n")
+                ));
+            }
+            
+            self.compose_email = reply;
+            self.mode = AppMode::Compose;
+            self.focus = FocusPanel::ComposeForm;
+            self.compose_field = ComposeField::Body; // Start in body field for reply
+            
+            self.show_info("Replying to all recipients");
         } else {
             self.show_error("No email selected");
         }
@@ -1037,22 +1174,74 @@ impl App {
             let original = &self.emails[idx];
             
             let mut forward = Email::new();
+            
+            // Set subject with Fwd: prefix
             forward.subject = if original.subject.starts_with("Fwd: ") {
                 original.subject.clone()
             } else {
                 format!("Fwd: {}", original.subject)
             };
             
-            // Set body with forwarded content
+            // Set from field to current account
+            let current_account = &self.config.accounts[self.current_account_idx];
+            forward.from = vec![crate::email::EmailAddress {
+                name: Some(current_account.name.clone()),
+                address: current_account.email.clone(),
+            }];
+            
+            // Set body with forwarded content header
+            let from_str = original.from.iter()
+                .map(|addr| {
+                    if let Some(name) = &addr.name {
+                        format!("{} <{}>", name, addr.address)
+                    } else {
+                        addr.address.clone()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+                
+            let to_str = original.to.iter()
+                .map(|addr| {
+                    if let Some(name) = &addr.name {
+                        format!("{} <{}>", name, addr.address)
+                    } else {
+                        addr.address.clone()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            
+            let mut forward_header = format!(
+                "\n\n---------- Forwarded message ----------\nFrom: {}\nDate: {}\nSubject: {}\nTo: {}",
+                from_str,
+                original.date.format("%a, %d %b %Y %H:%M:%S %z"),
+                original.subject,
+                to_str
+            );
+            
+            // Add CC if present
+            if !original.cc.is_empty() {
+                let cc_str = original.cc.iter()
+                    .map(|addr| {
+                        if let Some(name) = &addr.name {
+                            format!("{} <{}>", name, addr.address)
+                        } else {
+                            addr.address.clone()
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                forward_header.push_str(&format!("\nCc: {}", cc_str));
+            }
+            
+            forward_header.push_str("\n\n");
+            
+            // Add original body
             if let Some(body) = &original.body_text {
-                forward.body_text = Some(format!(
-                    "\n\n---------- Forwarded message ----------\nFrom: {}\nDate: {}\nSubject: {}\nTo: {}\n\n{}",
-                    original.from.iter().map(|addr| format!("{}", addr.address)).collect::<Vec<_>>().join(", "),
-                    original.date.format("%Y-%m-%d %H:%M"),
-                    original.subject,
-                    original.to.iter().map(|addr| format!("{}", addr.address)).collect::<Vec<_>>().join(", "),
-                    body
-                ));
+                forward.body_text = Some(format!("{}{}", forward_header, body));
+            } else {
+                forward.body_text = Some(forward_header);
             }
             
             // Copy attachments
@@ -1061,6 +1250,7 @@ impl App {
             self.compose_email = forward;
             self.mode = AppMode::Compose;
             self.focus = FocusPanel::ComposeForm;
+            self.compose_field = ComposeField::To; // Start in To field for forward
             
             self.show_info("Forwarding email");
         } else {

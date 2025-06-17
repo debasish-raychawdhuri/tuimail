@@ -239,6 +239,45 @@ impl Email {
         }
     }
     
+    /// Get Reply-To addresses from headers
+    pub fn reply_to(&self) -> Vec<EmailAddress> {
+        if let Some(reply_to_str) = self.headers.get("Reply-To") {
+            // Simple parsing - in a real implementation you'd want proper email parsing
+            vec![EmailAddress {
+                name: None,
+                address: reply_to_str.clone(),
+            }]
+        } else {
+            Vec::new()
+        }
+    }
+    
+    /// Get Message-ID from headers
+    pub fn message_id(&self) -> String {
+        self.headers.get("Message-ID").cloned().unwrap_or_default()
+    }
+    
+    /// Get References from headers
+    pub fn references(&self) -> Vec<String> {
+        if let Some(refs_str) = self.headers.get("References") {
+            refs_str.split_whitespace().map(|s| s.to_string()).collect()
+        } else {
+            Vec::new()
+        }
+    }
+    
+    /// Set In-Reply-To header
+    pub fn set_in_reply_to(&mut self, message_id: String) {
+        self.headers.insert("In-Reply-To".to_string(), message_id);
+    }
+    
+    /// Set References header
+    pub fn set_references(&mut self, references: Vec<String>) {
+        if !references.is_empty() {
+            self.headers.insert("References".to_string(), references.join(" "));
+        }
+    }
+    
     pub fn from_parsed_email(parsed: &mail_parser::Message, id: &str, folder: &str, flags: Vec<String>) -> Result<Self, EmailError> {
         let mut email = Email::new();
         
