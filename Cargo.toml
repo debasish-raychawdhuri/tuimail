@@ -2,6 +2,10 @@
 name = "email_client"
 version = "0.1.0"
 edition = "2021"
+
+[[bin]]
+name = "email_client"
+path = "src/main.rs"
 description = "A terminal UI email client with IMAP and SMTP support"
 authors = ["Your Name"]
 
