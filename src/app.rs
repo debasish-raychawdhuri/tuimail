@@ -1579,12 +1579,19 @@ impl App {
                         self.file_browser_mode = false;
                         self.file_browser_save_mode = false;
                     }
+                } else if self.file_browser_save_mode {
+                    // If no file selected but in save mode, save with default filename
+                    let save_path = self.file_browser_current_path.join(&self.file_browser_save_filename);
+                    self.save_attachment_to_path(&save_path)?;
+                    self.file_browser_mode = false;
+                    self.file_browser_save_mode = false;
                 }
                 Ok(())
             }
             KeyCode::Char('s') if self.file_browser_save_mode => {
                 // Save with current filename in current directory
                 let save_path = self.file_browser_current_path.join(&self.file_browser_save_filename);
+                println!("DEBUG: Saving attachment to: {}", save_path.display());
                 self.save_attachment_to_path(&save_path)?;
                 self.file_browser_mode = false;
                 self.file_browser_save_mode = false;
@@ -1784,7 +1791,7 @@ impl App {
             self.file_browser_mode = true;
             self.load_file_browser_directory()?;
             self.file_browser_selected = 0;
-            self.show_info(&format!("Choose location to save '{}' (Enter to select dir, 's' to save here)", filename));
+            self.show_info(&format!("Saving '{}' - Navigate to folder and press Enter or 's' to save", filename));
         } else {
             self.show_error("No attachment selected");
         }
