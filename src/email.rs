@@ -38,7 +38,7 @@ impl FolderMetadata {
 }
 
 // Helper function to log debug information to a file
-fn debug_log(message: &str) {
+pub fn debug_log(message: &str) {
     if std::env::var("EMAIL_DEBUG").is_ok() {
         let log_file = "/tmp/email_client_debug.log";
         if let Ok(mut file) = OpenOptions::new()

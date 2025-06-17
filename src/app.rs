@@ -6,7 +6,7 @@ use thiserror::Error;
 
 use crate::config::Config;
 use crate::credentials::SecureCredentials;
-use crate::email::{Email, EmailClient};
+use crate::email::{Email, EmailClient, debug_log};
 
 #[derive(Error, Debug)]
 pub enum AppError {
@@ -759,7 +759,7 @@ impl App {
     fn handle_compose_mode(&mut self, key: KeyEvent) -> AppResult<()> {
         // Handle file browser mode separately
         if self.file_browser_mode {
-            println!("DEBUG: Routing to file browser input handler");
+            debug_log("Routing to file browser input handler");
             return self.handle_file_browser_input(key);
         }
         
@@ -1549,7 +1549,7 @@ impl App {
 
     /// Handle key input when in file browser mode
     fn handle_file_browser_input(&mut self, key: KeyEvent) -> AppResult<()> {
-        println!("DEBUG: File browser input: {:?}", key);
+        debug_log(&format!("File browser input: {:?}", key));
         match key.code {
             KeyCode::Esc => {
                 // Exit file browser
@@ -1621,7 +1621,7 @@ impl App {
             KeyCode::Char('s') if self.file_browser_save_mode => {
                 // Save with current filename in current directory
                 let save_path = self.file_browser_current_path.join(&self.file_browser_save_filename);
-                println!("DEBUG: Saving attachment to: {}", save_path.display());
+                debug_log(&format!("Saving attachment to: {}", save_path.display()));
                 self.save_attachment_to_path(&save_path)?;
                 self.file_browser_mode = false;
                 self.file_browser_save_mode = false;
@@ -1644,7 +1644,7 @@ impl App {
     fn load_file_browser_directory(&mut self) -> AppResult<()> {
         self.file_browser_items.clear();
         
-        println!("DEBUG: Loading directory: {}", self.file_browser_current_path.display());
+        debug_log(&format!("Loading directory: {}", self.file_browser_current_path.display()));
         
         match std::fs::read_dir(&self.file_browser_current_path) {
             Ok(entries) => {
@@ -1687,9 +1687,9 @@ impl App {
                     }
                 }
                 
-                println!("DEBUG: Found {} items in directory", items.len());
+                debug_log(&format!("Found {} items in directory", items.len()));
                 for (i, item) in items.iter().enumerate() {
-                    println!("DEBUG: Item {}: {} ({})", i, item.name, if item.is_directory { "dir" } else { "file" });
+                    debug_log(&format!("Item {}: {} ({})", i, item.name, if item.is_directory { "dir" } else { "file" }));
                 }
                 
                 // Sort: directories first, then files, both alphabetically
@@ -1791,7 +1791,7 @@ impl App {
     
     /// Test file browser functionality
     pub fn test_file_browser(&mut self) -> AppResult<()> {
-        println!("DEBUG: Testing file browser");
+        debug_log("Testing file browser");
         
         // Set up test save data
         self.file_browser_save_mode = true;
