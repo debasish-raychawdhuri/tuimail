@@ -101,6 +101,21 @@ impl App {
     }
     
     pub fn init(&mut self) -> AppResult<()> {
+        // Debug logging
+        if std::env::var("EMAIL_DEBUG").is_ok() {
+            let log_file = "/tmp/email_client_debug.log";
+            if let Ok(mut file) = std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .append(true)
+                .open(log_file) 
+            {
+                use std::io::Write;
+                let _ = writeln!(file, "[{}] App::init() called", 
+                    Local::now().format("%Y-%m-%d %H:%M:%S"));
+            }
+        }
+        
         // Validate that we have accounts configured
         if self.config.accounts.is_empty() {
             return Err(AppError::EmailError(
@@ -118,6 +133,21 @@ impl App {
                 ));
             }
         };
+        
+        // Debug logging
+        if std::env::var("EMAIL_DEBUG").is_ok() {
+            let log_file = "/tmp/email_client_debug.log";
+            if let Ok(mut file) = std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .append(true)
+                .open(log_file) 
+            {
+                use std::io::Write;
+                let _ = writeln!(file, "[{}] Creating EmailClient for account: {}", 
+                    Local::now().format("%Y-%m-%d %H:%M:%S"), account.email);
+            }
+        }
         
         let email_client = EmailClient::new(account);
         

@@ -1078,6 +1078,216 @@ impl EmailClient {
         }
     }
     
+    pub fn supports_idle(&self) -> bool {
+        // Try to connect and check capabilities
+        match self.account.imap_security {
+            ImapSecurity::SSL | ImapSecurity::StartTLS => {
+                if let Ok(mut session) = self.connect_imap_secure() {
+                    session.capabilities().map(|caps| caps.has_str("IDLE")).unwrap_or(false)
+                } else {
+                    false
+                }
+            }
+            ImapSecurity::None => {
+                if let Ok(mut session) = self.connect_imap_plain() {
+                    session.capabilities().map(|caps| caps.has_str("IDLE")).unwrap_or(false)
+                } else {
+                    false
+                }
+            }
+        }
+    }
+
+    pub fn run_idle_session(
+        &self,
+        folder: &str,
+        tx: &mpsc::Sender<Vec<Email>>,
+        running: &Arc<Mutex<bool>>,
+    ) -> Result<(), EmailError> {
+        debug_log(&format!("Starting IDLE session for folder: {}", folder));
+        
+        match self.account.imap_security {
+            ImapSecurity::SSL | ImapSecurity::StartTLS => {
+                self.run_idle_session_secure(folder, tx, running)
+            }
+            ImapSecurity::None => {
+                self.run_idle_session_plain(folder, tx, running)
+            }
+        }
+    }
+    
+    fn run_idle_session_secure(
+        &self,
+        folder: &str,
+        tx: &mpsc::Sender<Vec<Email>>,
+        running: &Arc<Mutex<bool>>,
+    ) -> Result<(), EmailError> {
+        let mut session = self.connect_imap_secure()?;
+        session.select(folder)
+            .map_err(|e| EmailError::ImapError(e.to_string()))?;
+        
+        debug_log("IDLE session: connected and folder selected");
+        
+        // Check if server supports IDLE
+        let caps = session.capabilities()
+            .map_err(|e| EmailError::ImapError(e.to_string()))?;
+        
+        if !caps.has_str("IDLE") {
+            debug_log("Server does not support IDLE, falling back to polling");
+            return Err(EmailError::ImapError("Server does not support IDLE".to_string()));
+        }
+        
+        debug_log("IDLE session: Server supports IDLE, starting IDLE loop");
+        
+        // Simple IDLE loop - just use it as a more efficient polling mechanism
+        loop {
+            // Check if we should stop
+            {
+                let running_guard = running.lock().unwrap();
+                if !*running_guard {
+                    debug_log("IDLE session: stopping due to running flag");
+                    break;
+                }
+            }
+            
+            // Start IDLE and wait for a short time
+            match session.idle() {
+                Ok(mut idle_handle) => {
+                    debug_log("IDLE session: IDLE started, waiting for notifications");
+                    
+                    // Wait for 30 seconds or until notification
+                    let timeout = std::time::Duration::from_secs(30);
+                    match idle_handle.wait_with_timeout(timeout) {
+                        Ok(_) => {
+                            debug_log("IDLE session: received notification, fetching emails");
+                            
+                            // Fetch new emails
+                            match self.fetch_emails(folder, 50) {
+                                Ok(emails) => {
+                                    debug_log(&format!("IDLE session: fetched {} emails", emails.len()));
+                                    if let Err(e) = tx.try_send(emails) {
+                                        match e {
+                                            mpsc::error::TrySendError::Full(_) => {
+                                                debug_log("IDLE session: email channel full, skipping update");
+                                            }
+                                            mpsc::error::TrySendError::Closed(_) => {
+                                                debug_log("IDLE session: email channel closed, stopping");
+                                                return Ok(());
+                                            }
+                                        }
+                                    } else {
+                                        debug_log("IDLE session: emails sent to UI");
+                                    }
+                                }
+                                Err(e) => {
+                                    debug_log(&format!("IDLE session: failed to fetch emails: {}", e));
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            debug_log(&format!("IDLE session: timeout or error: {}", e));
+                            // This is normal for timeout
+                        }
+                    }
+                }
+                Err(e) => {
+                    debug_log(&format!("IDLE session: failed to start IDLE: {}", e));
+                    // Fall back to regular polling for this iteration
+                    std::thread::sleep(std::time::Duration::from_secs(30));
+                }
+            }
+        }
+        
+        debug_log("IDLE session: stopped");
+        Ok(())
+    }
+    
+    fn run_idle_session_plain(
+        &self,
+        folder: &str,
+        tx: &mpsc::Sender<Vec<Email>>,
+        running: &Arc<Mutex<bool>>,
+    ) -> Result<(), EmailError> {
+        let mut session = self.connect_imap_plain()?;
+        session.select(folder)
+            .map_err(|e| EmailError::ImapError(e.to_string()))?;
+        
+        debug_log("IDLE session (plain): connected and folder selected");
+        
+        // Check if server supports IDLE
+        let caps = session.capabilities()
+            .map_err(|e| EmailError::ImapError(e.to_string()))?;
+        
+        if !caps.has_str("IDLE") {
+            debug_log("Server does not support IDLE, falling back to polling");
+            return Err(EmailError::ImapError("Server does not support IDLE".to_string()));
+        }
+        
+        debug_log("IDLE session (plain): Server supports IDLE, starting IDLE loop");
+        
+        // Simple IDLE loop - just use it as a more efficient polling mechanism
+        loop {
+            // Check if we should stop
+            {
+                let running_guard = running.lock().unwrap();
+                if !*running_guard {
+                    debug_log("IDLE session (plain): stopping due to running flag");
+                    break;
+                }
+            }
+            
+            // Start IDLE and wait for a short time
+            match session.idle() {
+                Ok(mut idle_handle) => {
+                    debug_log("IDLE session (plain): IDLE started, waiting for notifications");
+                    
+                    // Wait for 30 seconds or until notification
+                    let timeout = std::time::Duration::from_secs(30);
+                    match idle_handle.wait_with_timeout(timeout) {
+                        Ok(_) => {
+                            debug_log("IDLE session (plain): received notification, fetching emails");
+                            
+                            // Fetch new emails
+                            match self.fetch_emails(folder, 50) {
+                                Ok(emails) => {
+                                    debug_log(&format!("IDLE session (plain): fetched {} emails", emails.len()));
+                                    if let Err(e) = tx.try_send(emails) {
+                                        match e {
+                                            mpsc::error::TrySendError::Full(_) => {
+                                                debug_log("IDLE session (plain): email channel full, skipping update");
+                                            }
+                                            mpsc::error::TrySendError::Closed(_) => {
+                                                debug_log("IDLE session (plain): email channel closed, stopping");
+                                                return Ok(());
+                                            }
+                                        }
+                                    } else {
+                                        debug_log("IDLE session (plain): emails sent to UI");
+                                    }
+                                }
+                                Err(e) => {
+                                    debug_log(&format!("IDLE session (plain): failed to fetch emails: {}", e));
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            debug_log(&format!("IDLE session (plain): timeout or error: {}", e));
+                            // This is normal for timeout
+                        }
+                    }
+                }
+                Err(e) => {
+                    debug_log(&format!("IDLE session (plain): failed to start IDLE: {}", e));
+                    // Fall back to regular polling for this iteration
+                    std::thread::sleep(std::time::Duration::from_secs(30));
+                }
+            }
+        }
+        
+        debug_log("IDLE session (plain): stopped");
+        Ok(())
+    }
+
     pub fn move_email(&self, email: &Email, target_folder: &str) -> Result<(), EmailError> {
         match self.account.imap_security {
             ImapSecurity::SSL | ImapSecurity::StartTLS => {
@@ -1108,13 +1318,14 @@ impl EmailClient {
     }
 }
 
-// Background email fetcher with improved thread safety
+// Background email fetcher with IMAP IDLE support
 pub struct EmailFetcher {
     client: EmailClient,
     tx: mpsc::Sender<Vec<Email>>,
     interval: std::time::Duration,
     running: Arc<Mutex<bool>>,
     handle: Option<std::thread::JoinHandle<()>>,
+    use_idle: bool,
 }
 
 impl EmailFetcher {
@@ -1123,12 +1334,17 @@ impl EmailFetcher {
         tx: mpsc::Sender<Vec<Email>>,
         interval_secs: u64,
     ) -> Self {
+        // Check if server supports IDLE
+        let use_idle = client.supports_idle();
+        debug_log(&format!("Server IDLE support: {}", use_idle));
+        
         Self {
             client,
             tx,
             interval: std::time::Duration::from_secs(interval_secs),
             running: Arc::new(Mutex::new(false)),
             handle: None,
+            use_idle,
         }
     }
     

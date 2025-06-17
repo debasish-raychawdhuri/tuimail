@@ -7,6 +7,7 @@ use std::io;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use chrono::Local;
 use clap::{Parser, Subcommand};
 use crossterm::event::{self, Event, KeyEventKind};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
@@ -101,6 +102,21 @@ enum Commands {
 fn main() -> Result<()> {
     // Parse command line arguments
     let args = Args::parse();
+    
+    // Initialize debug logging early if EMAIL_DEBUG is set
+    if std::env::var("EMAIL_DEBUG").is_ok() {
+        let log_file = "/tmp/email_client_debug.log";
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(log_file) 
+        {
+            use std::io::Write;
+            let _ = writeln!(file, "[{}] Email client starting with debug logging", 
+                chrono::Local::now().format("%Y-%m-%d %H:%M:%S"));
+        }
+    }
     
     // Initialize logger
     env_logger::Builder::new()
@@ -244,6 +260,21 @@ fn main() -> Result<()> {
     // Create app state
     let mut app = App::new(config);
     
+    // Debug logging
+    if std::env::var("EMAIL_DEBUG").is_ok() {
+        let log_file = "/tmp/email_client_debug.log";
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .append(true)
+            .open(log_file) 
+        {
+            use std::io::Write;
+            let _ = writeln!(file, "[{}] App created, about to call run_app", 
+                Local::now().format("%Y-%m-%d %H:%M:%S"));
+        }
+    }
+    
     // Run the application
     let result = run_app(&mut terminal, &mut app);
     
@@ -265,6 +296,20 @@ fn main() -> Result<()> {
 fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> AppResult<()> {
     // Initialize app with error handling
     if let Err(e) = app.init() {
+        // Log the error to debug file if debug is enabled
+        if std::env::var("EMAIL_DEBUG").is_ok() {
+            let log_file = "/tmp/email_client_debug.log";
+            if let Ok(mut file) = std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .append(true)
+                .open(log_file) 
+            {
+                use std::io::Write;
+                let _ = writeln!(file, "[{}] App initialization failed: {}", 
+                    Local::now().format("%Y-%m-%d %H:%M:%S"), e);
+            }
+        }
         return Err(e);
     }
     
