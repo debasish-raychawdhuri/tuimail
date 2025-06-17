@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::fs;
+use std::fs::OpenOptions;
+use std::io::Write;
 
 use anyhow::Result;
 use chrono::{DateTime, Local, Utc};
@@ -15,9 +17,42 @@ use serde::{Serialize, Deserialize};
 
 use crate::config::{EmailAccount, ImapSecurity, SmtpSecurity};
 
+// Helper function to log debug information to a file
+fn debug_log(message: &str) {
+    if std::env::var("EMAIL_DEBUG").is_ok() {
+        let log_file = "/tmp/email_client_debug.log";
+        if let Ok(mut file) = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log_file)
+        {
+            let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+            let _ = writeln!(file, "[{}] {}", timestamp, message);
+        }
+    }
+}
+
+// Helper function to initialize debug logging
+fn init_debug_log() {
+    if std::env::var("EMAIL_DEBUG").is_ok() {
+        let log_file = "/tmp/email_client_debug.log";
+        if let Ok(mut file) = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(log_file)
+        {
+            let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+            let _ = writeln!(file, "[{}] === Email Client Debug Log Started ===", timestamp);
+        }
+    }
+}
+
 // Helper function to parse email addresses from header values
 fn parse_email_addresses(value: &str) -> Vec<EmailAddress> {
     let mut addresses = Vec::new();
+    
+    debug_log(&format!("Parsing email addresses from: '{}'", value));
     
     // Handle multiple addresses separated by commas
     for addr_part in value.split(',') {
@@ -25,6 +60,8 @@ fn parse_email_addresses(value: &str) -> Vec<EmailAddress> {
         if addr_part.is_empty() {
             continue;
         }
+        
+        debug_log(&format!("Processing address part: '{}'", addr_part));
         
         // Handle different formats:
         // 1. "Name" <email@domain.com>
@@ -44,6 +81,8 @@ fn parse_email_addresses(value: &str) -> Vec<EmailAddress> {
                     name_part
                 };
                 
+                debug_log(&format!("Extracted: name='{}', email='{}'", clean_name, email_addr));
+                
                 addresses.push(EmailAddress {
                     name: if clean_name.is_empty() { None } else { Some(clean_name.to_string()) },
                     address: email_addr.to_string(),
@@ -51,13 +90,17 @@ fn parse_email_addresses(value: &str) -> Vec<EmailAddress> {
             }
         } else if addr_part.contains('@') {
             // No angle brackets, assume the whole thing is an email
+            debug_log(&format!("Simple email format: '{}'", addr_part));
             addresses.push(EmailAddress {
                 name: None,
                 address: addr_part.to_string(),
             });
+        } else {
+            debug_log(&format!("Unrecognized address format: '{}'", addr_part));
         }
     }
     
+    debug_log(&format!("Parsed {} addresses total", addresses.len()));
     addresses
 }
 
@@ -186,6 +229,7 @@ impl Email {
         
         // Extract subject
         email.subject = parsed.subject().unwrap_or_default().to_string();
+        debug_log(&format!("Email subject: '{}'", email.subject));
         
         // Extract date
         if let Some(date) = parsed.date() {
@@ -194,16 +238,24 @@ impl Email {
                 .with_timezone(&Local);
         }
         
+        debug_log("Starting header extraction...");
+        
         // Extract headers and parse addresses from them
+        let mut header_count = 0;
         for header in parsed.headers() {
+            header_count += 1;
             let name = header.name().to_string();
             if let Some(value) = header.value().as_text_ref() {
                 email.headers.insert(name.clone(), value.to_string());
                 
+                debug_log(&format!("Header[{}]: '{}' = '{}'", header_count, name, value));
+                
                 // Parse basic from/to information from headers
                 match name.to_lowercase().as_str() {
                     "from" => {
+                        debug_log(&format!("Found From header: '{}'", value));
                         let addresses = parse_email_addresses(value);
+                        debug_log(&format!("Parsed {} addresses from From header", addresses.len()));
                         email.from.extend(addresses);
                     }
                     "to" => {
@@ -216,24 +268,39 @@ impl Email {
                     }
                     _ => {}
                 }
+            } else {
+                debug_log(&format!("Header[{}]: '{}' has no text value", header_count, name));
             }
         }
         
+        debug_log(&format!("Processed {} headers total", header_count));
+        
         // If we still don't have a from address, try to create one from the headers map
         if email.from.is_empty() {
+            debug_log("No from addresses found, trying headers map fallback");
             if let Some(from_value) = email.headers.get("From").or_else(|| email.headers.get("from")) {
+                debug_log(&format!("Found From in headers map: '{}'", from_value));
                 let addresses = parse_email_addresses(from_value);
                 email.from.extend(addresses);
+            } else {
+                debug_log("No From header found in headers map either");
             }
         }
         
         // Extract body parts
         if let Some(text_body) = parsed.body_text(0) {
             email.body_text = Some(text_body.to_string());
+            debug_log(&format!("Extracted text body: {} chars", text_body.len()));
         }
         
         if let Some(html_body) = parsed.body_html(0) {
             email.body_html = Some(html_body.to_string());
+            debug_log(&format!("Extracted HTML body: {} chars", html_body.len()));
+        }
+        
+        debug_log(&format!("Final email from addresses: {} total", email.from.len()));
+        for (i, addr) in email.from.iter().enumerate() {
+            debug_log(&format!("  Final From[{}]: name={:?}, address='{}'", i, addr.name, addr.address));
         }
         
         Ok(email)
@@ -248,13 +315,16 @@ pub struct EmailClient {
 
 impl EmailClient {
     pub fn new(account: EmailAccount) -> Self {
+        init_debug_log();
+        debug_log(&format!("Creating EmailClient for account: {}", account.email));
+        
         let cache_dir = format!("{}/.cache/email_client/{}", 
             dirs::home_dir().unwrap_or_default().display(), 
             account.email.replace('@', "_at_").replace('.', "_"));
         
         // Create cache directory if it doesn't exist
         if let Err(e) = fs::create_dir_all(&cache_dir) {
-            eprintln!("Warning: Could not create cache directory {}: {}", cache_dir, e);
+            debug_log(&format!("Warning: Could not create cache directory {}: {}", cache_dir, e));
         }
         
         Self { account, cache_dir }
@@ -369,10 +439,14 @@ impl EmailClient {
     }
     
     pub fn fetch_emails(&self, folder: &str, limit: usize) -> Result<Vec<Email>, EmailError> {
+        debug_log(&format!("fetch_emails called: folder='{}', limit={}", folder, limit));
+        
         // Load cached emails first
         let cached_emails = self.load_cached_emails(folder);
+        debug_log(&format!("Loaded {} cached emails", cached_emails.len()));
         
         // Fetch new emails from server
+        debug_log(&format!("Fetching new emails from server using security: {:?}", self.account.imap_security));
         let new_emails = match self.account.imap_security {
             ImapSecurity::SSL | ImapSecurity::StartTLS => {
                 self.fetch_emails_from_server_secure(folder, limit)
@@ -384,22 +458,29 @@ impl EmailClient {
         
         match new_emails {
             Ok(new) => {
+                debug_log(&format!("Successfully fetched {} new emails from server", new.len()));
+                
                 // Merge cached and new emails
                 let merged = self.merge_emails(cached_emails, new);
+                debug_log(&format!("After merging: {} total emails", merged.len()));
                 
                 // Save updated cache
                 self.save_cached_emails(folder, &merged);
+                debug_log("Saved updated cache");
                 
                 // Return limited number for display, but keep all in cache
                 let display_limit = std::cmp::min(limit * 3, merged.len()); // Show more than requested
+                debug_log(&format!("Returning {} emails for display (limit was {})", display_limit, limit));
                 Ok(merged.into_iter().take(display_limit).collect())
             }
             Err(e) => {
+                debug_log(&format!("Server fetch failed: {}", e));
                 // If server fetch fails, return cached emails
                 if !cached_emails.is_empty() {
-                    eprintln!("Using cached emails due to server error: {}", e);
+                    debug_log(&format!("Using {} cached emails due to server error", cached_emails.len()));
                     Ok(cached_emails)
                 } else {
+                    debug_log("No cached emails available, returning error");
                     Err(e)
                 }
             }
@@ -483,7 +564,9 @@ impl EmailClient {
     fn parse_messages(&self, messages: &[imap::types::Fetch], folder: &str) -> Result<Vec<Email>, EmailError> {
         let mut emails = Vec::new();
         
-        for message in messages.iter() {
+        debug_log(&format!("Starting to parse {} messages from folder '{}'", messages.len(), folder));
+        
+        for (i, message) in messages.iter().enumerate() {
             if let Some(body) = message.body() {
                 let uid = message.uid.unwrap_or(0).to_string();
                 
@@ -493,46 +576,61 @@ impl EmailClient {
                     .map(|f| f.to_string())
                     .collect();
                 
-                // Debug: Print first few bytes of the email to see if we're getting data
-                if std::env::var("EMAIL_DEBUG").is_ok() {
-                    eprintln!("Parsing email UID {}, body length: {}", uid, body.len());
-                    if body.len() > 100 {
-                        eprintln!("First 200 chars: {}", String::from_utf8_lossy(&body[..200]));
-                    }
+                debug_log(&format!("Message {}: UID={}, body_length={}, flags={:?}", 
+                    i + 1, uid, body.len(), flags));
+                
+                if body.len() > 100 {
+                    let preview = String::from_utf8_lossy(&body[..200.min(body.len())]);
+                    debug_log(&format!("Message {} body preview: {}", i + 1, preview));
                 }
                 
                 match mail_parser::Message::parse(body) {
                     Some(parsed) => {
+                        debug_log(&format!("Message {} parsed successfully by mail_parser", i + 1));
                         match Email::from_parsed_email(&parsed, &uid, folder, flags) {
                             Ok(mut email) => {
-                                // Debug output if enabled
-                                if std::env::var("EMAIL_DEBUG").is_ok() {
-                                    eprintln!("Parsed email: subject='{}', from={:?}", email.subject, email.from);
+                                debug_log(&format!("Email parsed: subject='{}', from_count={}", 
+                                    email.subject, email.from.len()));
+                                
+                                for (j, addr) in email.from.iter().enumerate() {
+                                    debug_log(&format!("  From[{}]: name={:?}, address='{}'", 
+                                        j, addr.name, addr.address));
                                 }
                                 
                                 // Fallback: if we still don't have from addresses, try to extract from raw headers
                                 if email.from.is_empty() {
+                                    debug_log("No from addresses found, trying header fallback");
                                     if let Some(from_header) = email.headers.get("From").or_else(|| email.headers.get("from")) {
+                                        debug_log(&format!("Found From header in fallback: '{}'", from_header));
                                         let addresses = parse_email_addresses(from_header);
+                                        debug_log(&format!("Fallback parsed {} addresses", addresses.len()));
                                         email.from.extend(addresses);
+                                    } else {
+                                        debug_log("No From header found in fallback either");
+                                        debug_log(&format!("Available headers: {:?}", email.headers.keys().collect::<Vec<_>>()));
                                     }
                                 }
                                 
                                 emails.push(email);
                             }
-                            Err(e) => eprintln!("Error parsing email: {}", e),
+                            Err(e) => {
+                                debug_log(&format!("Error parsing email {}: {}", i + 1, e));
+                            }
                         }
                     }
                     None => {
-                        eprintln!("Failed to parse email with mail_parser");
+                        debug_log(&format!("Message {} failed to parse with mail_parser", i + 1));
                     }
                 }
+            } else {
+                debug_log(&format!("Message {} has no body", i + 1));
             }
         }
         
         // Sort by date, newest first
         emails.sort_by(|a, b| b.date.cmp(&a.date));
         
+        debug_log(&format!("Finished parsing, returning {} emails", emails.len()));
         Ok(emails)
     }
     
