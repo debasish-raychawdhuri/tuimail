@@ -53,6 +53,12 @@ fn render_title_bar(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_main_content(f: &mut Frame, app: &App, area: Rect) {
+    // If in file browser mode, show the file browser regardless of current mode
+    if app.file_browser_mode {
+        render_file_browser(f, app, area);
+        return;
+    }
+    
     match app.mode {
         AppMode::Normal => render_normal_mode(f, app, area),
         AppMode::ViewEmail => render_view_email_mode(f, app, area),
@@ -333,12 +339,6 @@ fn render_email_body(f: &mut Frame, email: &Email, area: Rect) {
 }
 
 fn render_compose_mode(f: &mut Frame, app: &App, area: Rect) {
-    // If in file browser mode, show the file browser
-    if app.file_browser_mode {
-        render_file_browser(f, app, area);
-        return;
-    }
-    
     // If in attachment input mode, show the input dialog
     if app.attachment_input_mode {
         render_attachment_input_dialog(f, app, area);
