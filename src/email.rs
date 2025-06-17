@@ -427,8 +427,13 @@ impl Email {
         }
         
         // Extract attachments
+        debug_log("=== STARTING ATTACHMENT EXTRACTION ===");
         email.attachments = Self::extract_attachments(parsed);
-        debug_log(&format!("Extracted {} attachments", email.attachments.len()));
+        debug_log(&format!("=== FINISHED ATTACHMENT EXTRACTION: {} attachments ===", email.attachments.len()));
+        for (i, att) in email.attachments.iter().enumerate() {
+            debug_log(&format!("  ATTACHMENT {}: {} ({} bytes, {})", 
+                i + 1, att.filename, att.data.len(), att.content_type));
+        }
         
         debug_log(&format!("Final email from addresses: {} total", email.from.len()));
         for (i, addr) in email.from.iter().enumerate() {
@@ -442,23 +447,50 @@ impl Email {
     fn extract_attachments(parsed: &mail_parser::Message) -> Vec<EmailAttachment> {
         let mut attachments = Vec::new();
         
+        debug_log(&format!("=== PARSING MESSAGE WITH {} PARTS ===", parsed.parts.len()));
+        
         // Iterate through all parts of the message
-        for part in parsed.parts.iter() {
+        for (i, part) in parsed.parts.iter().enumerate() {
+            debug_log(&format!("=== PROCESSING PART {} ({} headers) ===", i, part.headers.len()));
+            
+            // Debug: Print all headers for this part
+            for header in &part.headers {
+                let header_name = format!("{:?}", header.name);
+                let header_value = match &header.value {
+                    mail_parser::HeaderValue::Text(text) => text.as_ref(),
+                    mail_parser::HeaderValue::TextList(list) => {
+                        if let Some(first) = list.first() {
+                            first.as_ref()
+                        } else {
+                            "empty_list"
+                        }
+                    }
+                    _ => "other_type",
+                };
+                debug_log(&format!("  HEADER: {} = {}", header_name, header_value));
+            }
+            
             // Check if this part is an attachment
             if let Some(attachment) = Self::extract_attachment_from_part(part) {
+                debug_log(&format!("=== FOUND ATTACHMENT IN PART {}: {} ===", i, attachment.filename));
                 attachments.push(attachment);
+            } else {
+                debug_log(&format!("=== PART {} IS NOT AN ATTACHMENT ===", i));
             }
         }
         
-        debug_log(&format!("Found {} attachments in email", attachments.len()));
+        debug_log(&format!("=== TOTAL ATTACHMENTS FOUND: {} ===", attachments.len()));
         attachments
     }
     
     /// Extract attachment from a message part if it is an attachment
     fn extract_attachment_from_part(part: &mail_parser::MessagePart) -> Option<EmailAttachment> {
+        debug_log("Checking part for attachment...");
+        
         // Check if this part has a filename (indicating it's an attachment)
         let mut filename = None;
         let mut content_type = "application/octet-stream".to_string();
+        let mut is_attachment = false;
         
         // Look through headers to find content-disposition and content-type
         for header in &part.headers {
@@ -477,9 +509,15 @@ impl Email {
                 _ => continue,
             };
             
+            debug_log(&format!("Checking header: {} = {}", header_name_str, header_value));
+            
             if header_name_str.contains("contentdisposition") || header_name_str.contains("content-disposition") {
+                debug_log("Found content-disposition header");
                 // Simple parsing for filename parameter
                 if header_value.contains("attachment") || header_value.contains("inline") {
+                    is_attachment = true;
+                    debug_log("Part is marked as attachment or inline");
+                    
                     if let Some(start) = header_value.find("filename=") {
                         let filename_part = &header_value[start + 9..];
                         let filename_part = filename_part.trim_start_matches('"');
@@ -490,14 +528,17 @@ impl Email {
                         } else {
                             filename = Some(filename_part.trim().to_string());
                         }
+                        debug_log(&format!("Extracted filename: {:?}", filename));
                     }
                 }
             } else if header_name_str.contains("contenttype") || header_name_str.contains("content-type") {
+                debug_log("Found content-type header");
                 if let Some(semicolon_pos) = header_value.find(';') {
                     content_type = header_value[..semicolon_pos].trim().to_string();
                 } else {
                     content_type = header_value.trim().to_string();
                 }
+                debug_log(&format!("Content type: {}", content_type));
                 
                 // Also check for name parameter in content-type
                 if filename.is_none() {
@@ -511,32 +552,60 @@ impl Email {
                         } else {
                             filename = Some(name_part.trim().to_string());
                         }
+                        debug_log(&format!("Extracted filename from content-type: {:?}", filename));
                     }
                 }
             }
         }
         
-        if let Some(filename) = filename {
+        // If we have a filename or it's marked as attachment, try to extract it
+        if filename.is_some() || is_attachment {
+            let final_filename = filename.unwrap_or_else(|| "unnamed_attachment".to_string());
+            
             // Get the body data
             let data = match &part.body {
-                mail_parser::PartType::Text(text) => text.as_bytes().to_vec(),
-                mail_parser::PartType::Html(html) => html.as_bytes().to_vec(),
-                mail_parser::PartType::Binary(binary) => binary.to_vec(),
-                mail_parser::PartType::InlineBinary(binary) => binary.to_vec(),
-                mail_parser::PartType::Message(_) => Vec::new(), // Skip nested messages for now
-                mail_parser::PartType::Multipart(_) => Vec::new(), // Skip multipart containers
+                mail_parser::PartType::Text(text) => {
+                    debug_log("Part body is text");
+                    text.as_bytes().to_vec()
+                }
+                mail_parser::PartType::Html(html) => {
+                    debug_log("Part body is HTML");
+                    html.as_bytes().to_vec()
+                }
+                mail_parser::PartType::Binary(binary) => {
+                    debug_log("Part body is binary");
+                    binary.to_vec()
+                }
+                mail_parser::PartType::InlineBinary(binary) => {
+                    debug_log("Part body is inline binary");
+                    binary.to_vec()
+                }
+                mail_parser::PartType::Message(_) => {
+                    debug_log("Part body is nested message - skipping");
+                    Vec::new()
+                }
+                mail_parser::PartType::Multipart(_) => {
+                    debug_log("Part body is multipart container - skipping");
+                    Vec::new()
+                }
             };
             
+            debug_log(&format!("Extracted {} bytes of data", data.len()));
+            
             if !data.is_empty() {
-                debug_log(&format!("Found attachment: {} ({} bytes, {})", 
-                    filename, data.len(), content_type));
+                debug_log(&format!("Creating attachment: {} ({} bytes, {})", 
+                    final_filename, data.len(), content_type));
                 
                 return Some(EmailAttachment {
-                    filename,
+                    filename: final_filename,
                     content_type,
                     data,
                 });
+            } else {
+                debug_log("No data found in part body");
             }
+        } else {
+            debug_log("Part has no filename and is not marked as attachment");
         }
         
         None

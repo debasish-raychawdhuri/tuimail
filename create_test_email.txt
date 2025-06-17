@@ -1,0 +1,18 @@
+Test Email with Attachment
+
+Subject: Debug Attachment Test
+Body: This is a test email to debug attachment parsing. It should contain one text attachment.
+
+Attachment: test_debug.txt
+Content: This is test attachment content for debugging.
+Size: Small text file
+Type: text/plain
+
+Instructions:
+1. Use the email client to compose this email
+2. Attach the test_attachment.txt file from the project directory
+3. Send it to yourself
+4. Check if it appears with attachment indicator
+5. Open the email to see if attachments are parsed
+
+This will help verify the complete attachment cycle.
