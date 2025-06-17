@@ -173,10 +173,8 @@ impl SecureCredentials {
     /// Create a new secure credential manager
     pub fn new() -> Result<Self> {
         if CredentialManager::is_available() {
-            log::info!("Using system keyring for secure password storage");
             Ok(Self::SystemKeyring(CredentialManager::new()?))
         } else {
-            log::warn!("System keyring not available, using fallback encryption");
             Ok(Self::Fallback(FallbackCredentialManager::new()?))
         }
     }

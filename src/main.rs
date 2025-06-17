@@ -120,10 +120,12 @@ fn main() -> Result<()> {
         }
     }
     
-    // Initialize logger
-    env_logger::Builder::new()
-        .filter_level(if args.debug { log::LevelFilter::Debug } else { log::LevelFilter::Info })
-        .init();
+    // Initialize logger - only for CLI commands, not TUI mode
+    if matches!(args.command, Some(_)) {
+        env_logger::Builder::new()
+            .filter_level(if args.debug { log::LevelFilter::Debug } else { log::LevelFilter::Info })
+            .init();
+    }
     
     // Load configuration
     let config_path = shellexpand::tilde(&args.config).into_owned();
