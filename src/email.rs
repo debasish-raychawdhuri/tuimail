@@ -663,6 +663,12 @@ impl EmailClient {
         // First time sync - fetch recent messages
         if metadata.last_uid == 0 {
             debug_log("First time sync - fetching recent messages");
+            
+            // Check if the folder is empty
+            if current_total == 0 {
+                debug_log("Folder is empty, skipping fetch");
+                return Ok(Vec::new()); // Return empty vector for empty folders
+            }
             let fetch_count = std::cmp::min(100, current_total); // Fetch last 100 messages initially
             let start_seq = if current_total > fetch_count {
                 current_total - fetch_count + 1
@@ -746,6 +752,12 @@ impl EmailClient {
         // First time sync - fetch recent messages
         if metadata.last_uid == 0 {
             debug_log("First time sync - fetching recent messages");
+            
+            // Check if the folder is empty
+            if current_total == 0 {
+                debug_log("Folder is empty, skipping fetch");
+                return Ok(Vec::new()); // Return empty vector for empty folders
+            }
             let fetch_count = std::cmp::min(100, current_total); // Fetch last 100 messages initially
             let start_seq = if current_total > fetch_count {
                 current_total - fetch_count + 1
