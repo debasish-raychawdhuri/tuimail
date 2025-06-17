@@ -6,8 +6,6 @@ edition = "2021"
 [[bin]]
 name = "email_client"
 path = "src/main.rs"
-description = "A terminal UI email client with IMAP and SMTP support"
-authors = ["Your Name"]
 
 [dependencies]
 # Terminal UI

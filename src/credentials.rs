@@ -24,7 +24,8 @@ impl CredentialManager {
         entry.set_password(password)
             .context("Failed to store password in keyring")?;
 
-        println!("✓ Password stored securely for {} ({})", account_id, password_type);
+        // Don't print to stdout during TUI operation - use debug logging instead
+        log::debug!("Password stored securely for {} ({})", account_id, password_type);
         Ok(())
     }
 
@@ -49,7 +50,7 @@ impl CredentialManager {
         
         match entry.delete_password() {
             Ok(()) => {
-                println!("✓ Password deleted for {} ({})", account_id, password_type);
+                log::debug!("Password deleted for {} ({})", account_id, password_type);
                 Ok(())
             }
             Err(KeyringError::NoEntry) => {
@@ -107,8 +108,8 @@ impl FallbackCredentialManager {
         std::fs::write(&file_path, encrypted)
             .context("Failed to write encrypted password file")?;
 
-        println!("⚠ Password stored with fallback encryption for {} ({})", account_id, password_type);
-        println!("  Note: For better security, install GNOME Keyring or similar");
+        log::warn!("Password stored with fallback encryption for {} ({})", account_id, password_type);
+        log::warn!("Note: For better security, install GNOME Keyring or similar");
         Ok(())
     }
 
@@ -139,7 +140,7 @@ impl FallbackCredentialManager {
                 .context("Failed to delete password file")?;
         }
 
-        println!("✓ Password deleted for {} ({})", account_id, password_type);
+        log::debug!("Password deleted for {} ({})", account_id, password_type);
         Ok(())
     }
 
@@ -172,10 +173,10 @@ impl SecureCredentials {
     /// Create a new secure credential manager
     pub fn new() -> Result<Self> {
         if CredentialManager::is_available() {
-            println!("✓ Using system keyring for secure password storage");
+            log::info!("Using system keyring for secure password storage");
             Ok(Self::SystemKeyring(CredentialManager::new()?))
         } else {
-            println!("⚠ System keyring not available, using fallback encryption");
+            log::warn!("System keyring not available, using fallback encryption");
             Ok(Self::Fallback(FallbackCredentialManager::new()?))
         }
     }

@@ -4,7 +4,7 @@ mod credentials;
 mod email;
 mod ui;
 
-use std::io;
+use std::io::{self, Write};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -259,6 +259,12 @@ fn main() -> Result<()> {
         println!("Failed to save config: {}", e);
     }
     
+    // Check if we need to migrate passwords from old config format BEFORE entering TUI mode
+    if let Err(e) = migrate_passwords_if_needed(&mut config, &config_path) {
+        println!("Warning: Failed to migrate passwords to secure storage: {}", e);
+        println!("You may need to re-add your accounts with secure password storage.");
+    }
+    
     // Setup terminal
     enable_raw_mode().context("Failed to enable raw mode")?;
     io::stdout()
@@ -267,11 +273,8 @@ fn main() -> Result<()> {
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))
         .context("Failed to create terminal")?;
     
-    // Check if we need to migrate passwords from old config format
-    if let Err(e) = migrate_passwords_if_needed(&mut config, &config_path) {
-        println!("Warning: Failed to migrate passwords to secure storage: {}", e);
-        println!("You may need to re-add your accounts with secure password storage.");
-    }
+    // Clear the terminal to ensure clean start
+    terminal.clear().context("Failed to clear terminal")?;
     
     // Create app state
     let mut app = App::new(config);
@@ -400,6 +403,12 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> AppResult<(
             }
             continue;
         }
+        
+        // Ensure the terminal output is flushed
+        io::stdout().flush().ok();
+        
+        // Reset consecutive error counter on successful draw
+        consecutive_errors = 0;
         
         // Handle events
         if event::poll(Duration::from_millis(100))? {

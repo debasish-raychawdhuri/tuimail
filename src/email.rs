@@ -461,7 +461,7 @@ impl EmailClient {
         let cache_file = self.get_cache_file(folder);
         if let Ok(content) = serde_json::to_string_pretty(emails) {
             if let Err(e) = fs::write(&cache_file, content) {
-                eprintln!("Warning: Could not save email cache: {}", e);
+                log::warn!("Could not save email cache: {}", e);
             }
         }
     }
@@ -1388,18 +1388,18 @@ impl EmailFetcher {
                             match e {
                                 mpsc::error::TrySendError::Full(_) => {
                                     // Channel is full, skip this update
-                                    eprintln!("Email channel full, skipping update");
+                                    log::warn!("Email channel full, skipping update");
                                 }
                                 mpsc::error::TrySendError::Closed(_) => {
                                     // Receiver is closed, exit the loop
-                                    eprintln!("Email channel closed, stopping fetcher");
+                                    log::info!("Email channel closed, stopping fetcher");
                                     break;
                                 }
                             }
                         }
                     }
                     Err(e) => {
-                        eprintln!("Failed to fetch emails: {}", e);
+                        log::error!("Failed to fetch emails: {}", e);
                     }
                 }
                 
@@ -1421,7 +1421,7 @@ impl EmailFetcher {
         // Wait for the thread to finish
         if let Some(handle) = self.handle.take() {
             if let Err(e) = handle.join() {
-                eprintln!("Error joining email fetcher thread: {:?}", e);
+                log::error!("Error joining email fetcher thread: {:?}", e);
             }
         }
     }
@@ -1430,7 +1430,7 @@ impl EmailFetcher {
         // For now, we'll keep it simple and just use INBOX
         // In a more advanced implementation, we could use channels to communicate
         // folder changes to the background thread
-        eprintln!("Folder change requested: {}", folder);
+        log::debug!("Folder change requested: {}", folder);
     }
 }
 
