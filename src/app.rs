@@ -19,6 +19,13 @@ pub enum AppError {
 pub type AppResult<T> = std::result::Result<T, AppError>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ComposeField {
+    To,
+    Subject,
+    Body,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppMode {
     Normal,
     Compose,
@@ -53,6 +60,12 @@ pub struct App {
     pub email_rx: Option<mpsc::Receiver<Vec<Email>>>,
     pub email_fetcher: Option<EmailFetcher>,
     pub last_tick: Instant,
+    // Scrolling state
+    pub email_scroll_offset: usize,
+    pub folder_scroll_offset: usize,
+    pub email_view_scroll: usize,
+    // Compose form state
+    pub compose_field: ComposeField,
 }
 
 impl App {
@@ -74,6 +87,10 @@ impl App {
             email_rx: None,
             email_fetcher: None,
             last_tick: Instant::now(),
+            email_scroll_offset: 0,
+            folder_scroll_offset: 0,
+            email_view_scroll: 0,
+            compose_field: ComposeField::To,
         }
     }
     
@@ -189,6 +206,7 @@ impl App {
                 self.mode = AppMode::Compose;
                 self.focus = FocusPanel::ComposeForm;
                 self.compose_email = Email::new();
+                self.compose_field = ComposeField::To;
                 Ok(())
             }
             KeyCode::Char('r') => {
@@ -255,10 +273,117 @@ impl App {
             KeyCode::Esc => {
                 self.mode = AppMode::Normal;
                 self.focus = FocusPanel::EmailList;
+                self.compose_field = ComposeField::To;
+                Ok(())
+            }
+            KeyCode::Tab => {
+                // Move to next field
+                self.compose_field = match self.compose_field {
+                    ComposeField::To => ComposeField::Subject,
+                    ComposeField::Subject => ComposeField::Body,
+                    ComposeField::Body => ComposeField::To,
+                };
+                Ok(())
+            }
+            KeyCode::BackTab => {
+                // Move to previous field
+                self.compose_field = match self.compose_field {
+                    ComposeField::To => ComposeField::Body,
+                    ComposeField::Subject => ComposeField::To,
+                    ComposeField::Body => ComposeField::Subject,
+                };
+                Ok(())
+            }
+            KeyCode::Up => {
+                // Move to previous field
+                self.compose_field = match self.compose_field {
+                    ComposeField::To => ComposeField::Body,
+                    ComposeField::Subject => ComposeField::To,
+                    ComposeField::Body => ComposeField::Subject,
+                };
+                Ok(())
+            }
+            KeyCode::Down => {
+                // Move to next field
+                self.compose_field = match self.compose_field {
+                    ComposeField::To => ComposeField::Subject,
+                    ComposeField::Subject => ComposeField::Body,
+                    ComposeField::Body => ComposeField::To,
+                };
                 Ok(())
             }
             KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.send_email()?;
+                Ok(())
+            }
+            KeyCode::Char(c) => {
+                // Add character to current field
+                match self.compose_field {
+                    ComposeField::To => {
+                        let to_string = self.compose_email.to.iter()
+                            .map(|addr| addr.address.clone())
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        let new_to = format!("{}{}", to_string, c);
+                        
+                        // Parse the to field
+                        self.compose_email.to.clear();
+                        for addr in new_to.split(',') {
+                            let addr = addr.trim();
+                            if !addr.is_empty() {
+                                self.compose_email.to.push(crate::email::EmailAddress {
+                                    name: None,
+                                    address: addr.to_string(),
+                                });
+                            }
+                        }
+                    }
+                    ComposeField::Subject => {
+                        self.compose_email.subject.push(c);
+                    }
+                    ComposeField::Body => {
+                        if let Some(ref mut body) = self.compose_email.body_text {
+                            body.push(c);
+                        } else {
+                            self.compose_email.body_text = Some(c.to_string());
+                        }
+                    }
+                }
+                Ok(())
+            }
+            KeyCode::Backspace => {
+                // Remove character from current field
+                match self.compose_field {
+                    ComposeField::To => {
+                        if let Some(last_addr) = self.compose_email.to.last_mut() {
+                            if !last_addr.address.is_empty() {
+                                last_addr.address.pop();
+                                if last_addr.address.is_empty() {
+                                    self.compose_email.to.pop();
+                                }
+                            }
+                        }
+                    }
+                    ComposeField::Subject => {
+                        self.compose_email.subject.pop();
+                    }
+                    ComposeField::Body => {
+                        if let Some(ref mut body) = self.compose_email.body_text {
+                            body.pop();
+                        }
+                    }
+                }
+                Ok(())
+            }
+            KeyCode::Enter => {
+                // In body field, add newline
+                if self.compose_field == ComposeField::Body {
+                    if let Some(ref mut body) = self.compose_email.body_text {
+                        body.push('\n');
+                    } else {
+                        self.compose_email.body_text = Some("\n".to_string());
+                    }
+                }
                 Ok(())
             }
             _ => Ok(()),
@@ -269,6 +394,29 @@ impl App {
         match key.code {
             KeyCode::Esc => {
                 self.mode = AppMode::Normal;
+                self.email_view_scroll = 0; // Reset scroll when exiting
+                Ok(())
+            }
+            KeyCode::Up => {
+                if self.email_view_scroll > 0 {
+                    self.email_view_scroll -= 1;
+                }
+                Ok(())
+            }
+            KeyCode::Down => {
+                self.email_view_scroll += 1;
+                Ok(())
+            }
+            KeyCode::PageUp => {
+                self.email_view_scroll = self.email_view_scroll.saturating_sub(10);
+                Ok(())
+            }
+            KeyCode::PageDown => {
+                self.email_view_scroll += 10;
+                Ok(())
+            }
+            KeyCode::Home => {
+                self.email_view_scroll = 0;
                 Ok(())
             }
             KeyCode::Char('r') => {

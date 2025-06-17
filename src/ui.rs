@@ -2,7 +2,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph, Tabs, Wrap},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Tabs, Wrap},
     Frame,
 };
 
@@ -83,7 +83,11 @@ fn render_folder_list(f: &mut Frame, app: &App, area: Rect) {
         .block(Block::default().title("Folders").borders(Borders::ALL))
         .highlight_style(Style::default().add_modifier(Modifier::BOLD));
 
-    f.render_widget(folders, area);
+    // Add scrolling support
+    let mut state = ratatui::widgets::ListState::default();
+    state.select(Some(app.selected_folder_idx));
+
+    f.render_stateful_widget(folders, area, &mut state);
 }
 
 fn render_email_list(f: &mut Frame, app: &App, area: Rect) {
@@ -114,7 +118,13 @@ fn render_email_list(f: &mut Frame, app: &App, area: Rect) {
         .block(Block::default().title("Emails").borders(Borders::ALL))
         .highlight_style(Style::default().add_modifier(Modifier::BOLD));
 
-    f.render_widget(emails, area);
+    // Add scrolling support
+    let mut state = ratatui::widgets::ListState::default();
+    if let Some(selected) = app.selected_email_idx {
+        state.select(Some(selected));
+    }
+
+    f.render_stateful_widget(emails, area, &mut state);
 }
 
 fn render_view_email_mode(f: &mut Frame, app: &App, area: Rect) {
@@ -125,15 +135,28 @@ fn render_view_email_mode(f: &mut Frame, app: &App, area: Rect) {
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Length(4), // Header
+                    Constraint::Length(6), // Header (increased for better display)
                     Constraint::Min(0),    // Body
                 ])
                 .split(area);
             
             render_email_header(f, email, chunks[0]);
-            render_email_body(f, email, chunks[1]);
+            render_scrollable_email_body(f, email, chunks[1], app.email_view_scroll);
         }
     }
+}
+
+fn render_scrollable_email_body(f: &mut Frame, email: &Email, area: Rect, scroll_offset: usize) {
+    let content = email.body_text.as_deref().unwrap_or("No content");
+    
+    let body = Paragraph::new(content)
+        .block(Block::default()
+            .borders(Borders::ALL)
+            .title("Body (↑/↓ to scroll, PgUp/PgDn for fast scroll)"))
+        .wrap(Wrap { trim: false })
+        .scroll((scroll_offset as u16, 0));
+    
+    f.render_widget(body, area);
 }
 
 fn render_email_header(f: &mut Frame, email: &Email, area: Rect) {
@@ -176,7 +199,8 @@ fn render_email_body(f: &mut Frame, email: &Email, area: Rect) {
     
     let body = Paragraph::new(content)
         .block(Block::default().borders(Borders::ALL))
-        .wrap(Wrap { trim: false });
+        .wrap(Wrap { trim: false })
+        .scroll((0, 0)); // Add scroll support
     
     f.render_widget(body, area);
 }
@@ -185,26 +209,42 @@ fn render_compose_mode(f: &mut Frame, app: &App, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(4), // Header fields
+            Constraint::Length(8), // Header fields (increased for better display)
             Constraint::Min(0),    // Body
         ])
         .split(area);
     
-    // Render compose form header
+    // Render compose form header with field highlighting
     let to = app.compose_email.to.iter()
         .map(|addr| addr.address.clone())
         .collect::<Vec<_>>()
         .join(", ");
     
+    let to_style = if app.compose_field == crate::app::ComposeField::To {
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Gray)
+    };
+    
+    let subject_style = if app.compose_field == crate::app::ComposeField::Subject {
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Gray)
+    };
+    
     let header_text = vec![
+        Line::from(""),
         Line::from(vec![
-            Span::styled("To: ", Style::default().fg(Color::Gray)),
-            Span::raw(to),
+            Span::styled("To: ", to_style),
+            Span::raw(&to),
         ]),
+        Line::from(""),
         Line::from(vec![
-            Span::styled("Subject: ", Style::default().fg(Color::Gray)),
+            Span::styled("Subject: ", subject_style),
             Span::raw(&app.compose_email.subject),
         ]),
+        Line::from(""),
+        Line::from("Tab/↑↓: Navigate fields | Ctrl+S: Send | Esc: Cancel"),
     ];
     
     let header = Paragraph::new(header_text)
@@ -212,11 +252,27 @@ fn render_compose_mode(f: &mut Frame, app: &App, area: Rect) {
     
     f.render_widget(header, chunks[0]);
     
-    // Render compose form body
+    // Render compose form body with highlighting
     let content = app.compose_email.body_text.as_deref().unwrap_or("");
     
+    let body_style = if app.compose_field == crate::app::ComposeField::Body {
+        Style::default().fg(Color::Yellow)
+    } else {
+        Style::default()
+    };
+    
+    let body_title = if app.compose_field == crate::app::ComposeField::Body {
+        "Body (Active - Type to edit)"
+    } else {
+        "Body"
+    };
+    
     let body = Paragraph::new(content)
-        .block(Block::default().borders(Borders::ALL))
+        .block(Block::default()
+            .borders(Borders::ALL)
+            .title(body_title)
+            .border_style(body_style))
+        .style(body_style)
         .wrap(Wrap { trim: false });
     
     f.render_widget(body, chunks[1]);
@@ -239,12 +295,18 @@ fn render_folder_list_mode(f: &mut Frame, app: &App, area: Rect) {
         .collect();
 
     let folders = List::new(items)
-        .block(Block::default().title("Select Folder").borders(Borders::ALL))
+        .block(Block::default()
+            .title("Select Folder (↑/↓: Navigate, Enter: Select, Esc: Cancel)")
+            .borders(Borders::ALL))
         .highlight_style(Style::default().add_modifier(Modifier::BOLD));
+
+    // Add scrolling support
+    let mut state = ratatui::widgets::ListState::default();
+    state.select(Some(app.selected_folder_idx));
 
     // Center the folder list
     let centered_area = centered_rect(60, 80, area);
-    f.render_widget(folders, centered_area);
+    f.render_stateful_widget(folders, centered_area, &mut state);
 }
 
 fn render_settings_mode(f: &mut Frame, app: &App, area: Rect) {
