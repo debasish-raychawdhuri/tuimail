@@ -587,8 +587,28 @@ impl Email {
         }
         
         // If we have a filename or it's marked as attachment, try to extract it
-        if filename.is_some() || is_attachment {
-            let final_filename = filename.unwrap_or_else(|| "unnamed_attachment".to_string());
+        // Also treat non-text content types as potential attachments
+        let is_likely_attachment = filename.is_some() || is_attachment || 
+            (!content_type.starts_with("text/") && 
+             !content_type.starts_with("multipart/") && 
+             content_type != "application/octet-stream");
+        
+        if is_likely_attachment {
+            let final_filename = filename.unwrap_or_else(|| {
+                // Generate filename based on content type
+                match content_type.as_str() {
+                    "application/pdf" => "document.pdf".to_string(),
+                    "image/jpeg" => "image.jpg".to_string(),
+                    "image/png" => "image.png".to_string(),
+                    "image/gif" => "image.gif".to_string(),
+                    "application/zip" => "archive.zip".to_string(),
+                    "application/msword" => "document.doc".to_string(),
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => "document.docx".to_string(),
+                    _ => "attachment".to_string(),
+                }
+            });
+            
+            debug_log(&format!("Treating as attachment: content_type={}, filename={}", content_type, final_filename));
             
             // Get the body data
             let data = match &part.body {
@@ -633,7 +653,8 @@ impl Email {
                 debug_log("No data found in part body");
             }
         } else {
-            debug_log("Part has no filename and is not marked as attachment");
+            debug_log(&format!("Part not treated as attachment: content_type={}, filename={:?}, is_attachment={}", 
+                content_type, filename, is_attachment));
         }
         
         None
