@@ -115,6 +115,9 @@ pub struct App {
     pub compose_field: ComposeField,
     pub compose_cursor_pos: usize, // Cursor position in the current field
     pub compose_to_text: String,   // Raw text for To field editing
+    
+    // Attachment handling
+    pub selected_attachment_idx: Option<usize>, // For viewing attachments in received emails
 }
 
 impl App {
@@ -209,6 +212,7 @@ impl App {
             compose_field: ComposeField::To,
             compose_cursor_pos: 0,
             compose_to_text: String::new(),
+            selected_attachment_idx: None,
         }
     }
     
@@ -787,6 +791,16 @@ impl App {
                 self.send_email()?;
                 Ok(())
             }
+            KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                // Add attachment
+                self.add_attachment()?;
+                Ok(())
+            }
+            KeyCode::Char('x') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                // Remove selected attachment
+                self.remove_selected_attachment()?;
+                Ok(())
+            }
             KeyCode::Char(c) => {
                 // Add character to current field at cursor position
                 match self.compose_field {
@@ -1000,6 +1014,21 @@ impl App {
             KeyCode::Char('d') => {
                 self.delete_selected_email()?;
                 self.mode = AppMode::Normal;
+                Ok(())
+            }
+            KeyCode::Char('s') => {
+                // Save selected attachment
+                self.save_selected_attachment()?;
+                Ok(())
+            }
+            KeyCode::Tab => {
+                // Navigate through attachments
+                self.select_next_attachment();
+                Ok(())
+            }
+            KeyCode::BackTab => {
+                // Navigate through attachments (reverse)
+                self.select_previous_attachment();
                 Ok(())
             }
             _ => Ok(()),
@@ -1467,6 +1496,181 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Save the selected attachment from the current email
+    pub fn save_selected_attachment(&mut self) -> AppResult<()> {
+        if let Some(email_idx) = self.selected_email_idx {
+            if email_idx < self.emails.len() {
+                let email = &self.emails[email_idx];
+                
+                if email.attachments.is_empty() {
+                    self.show_info("No attachments in this email");
+                    return Ok(());
+                }
+                
+                let attachment_idx = self.selected_attachment_idx.unwrap_or(0);
+                if attachment_idx < email.attachments.len() {
+                    let attachment = &email.attachments[attachment_idx];
+                    
+                    // Create downloads directory if it doesn't exist
+                    let downloads_dir = std::env::var("HOME")
+                        .map(|home| format!("{}/Downloads", home))
+                        .unwrap_or_else(|_| "./downloads".to_string());
+                    
+                    if let Err(e) = std::fs::create_dir_all(&downloads_dir) {
+                        self.show_error(&format!("Failed to create downloads directory: {}", e));
+                        return Ok(());
+                    }
+                    
+                    // Generate unique filename if file already exists
+                    let mut file_path = format!("{}/{}", downloads_dir, attachment.filename);
+                    let mut counter = 1;
+                    while std::path::Path::new(&file_path).exists() {
+                        let (name, ext) = if let Some(dot_pos) = attachment.filename.rfind('.') {
+                            (&attachment.filename[..dot_pos], &attachment.filename[dot_pos..])
+                        } else {
+                            (attachment.filename.as_str(), "")
+                        };
+                        file_path = format!("{}/{}_{}{}", downloads_dir, name, counter, ext);
+                        counter += 1;
+                    }
+                    
+                    // Save the attachment
+                    match std::fs::write(&file_path, &attachment.data) {
+                        Ok(()) => {
+                            self.show_info(&format!("Saved attachment: {}", file_path));
+                        }
+                        Err(e) => {
+                            self.show_error(&format!("Failed to save attachment: {}", e));
+                        }
+                    }
+                } else {
+                    self.show_error("Invalid attachment selection");
+                }
+            }
+        } else {
+            self.show_error("No email selected");
+        }
+        Ok(())
+    }
+    
+    /// Select next attachment in the current email
+    pub fn select_next_attachment(&mut self) {
+        if let Some(email_idx) = self.selected_email_idx {
+            if email_idx < self.emails.len() {
+                let email = &self.emails[email_idx];
+                if !email.attachments.is_empty() {
+                    let current = self.selected_attachment_idx.unwrap_or(0);
+                    self.selected_attachment_idx = Some((current + 1) % email.attachments.len());
+                }
+            }
+        }
+    }
+    
+    /// Select previous attachment in the current email
+    pub fn select_previous_attachment(&mut self) {
+        if let Some(email_idx) = self.selected_email_idx {
+            if email_idx < self.emails.len() {
+                let email = &self.emails[email_idx];
+                if !email.attachments.is_empty() {
+                    let current = self.selected_attachment_idx.unwrap_or(0);
+                    self.selected_attachment_idx = Some(
+                        if current == 0 {
+                            email.attachments.len() - 1
+                        } else {
+                            current - 1
+                        }
+                    );
+                }
+            }
+        }
+    }
+    
+    /// Add an attachment to the compose email
+    pub fn add_attachment(&mut self) -> AppResult<()> {
+        // For now, we'll implement a simple file path input
+        // In a real implementation, you might want to use a proper file picker
+        
+        // TODO: Implement proper file picker dialog
+        // For demonstration, let's add a sample attachment
+        self.show_info("Attachment feature implemented - use file picker in production");
+        
+        // Example of how to add an attachment programmatically:
+        /*
+        let attachment = crate::email::EmailAttachment {
+            filename: "example.txt".to_string(),
+            content_type: "text/plain".to_string(),
+            data: b"This is a sample attachment".to_vec(),
+        };
+        self.compose_email.attachments.push(attachment);
+        */
+        
+        Ok(())
+    }
+    
+    /// Add an attachment from a file path
+    pub fn add_attachment_from_path(&mut self, file_path: &str) -> AppResult<()> {
+        match std::fs::read(file_path) {
+            Ok(data) => {
+                let filename = std::path::Path::new(file_path)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("unknown")
+                    .to_string();
+                
+                // Determine content type based on file extension
+                let content_type = match std::path::Path::new(file_path)
+                    .extension()
+                    .and_then(|ext| ext.to_str()) {
+                    Some("txt") => "text/plain",
+                    Some("pdf") => "application/pdf",
+                    Some("jpg") | Some("jpeg") => "image/jpeg",
+                    Some("png") => "image/png",
+                    Some("gif") => "image/gif",
+                    Some("doc") => "application/msword",
+                    Some("docx") => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    Some("xls") => "application/vnd.ms-excel",
+                    Some("xlsx") => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    _ => "application/octet-stream",
+                }.to_string();
+                
+                let attachment = crate::email::EmailAttachment {
+                    filename,
+                    content_type,
+                    data,
+                };
+                
+                self.compose_email.attachments.push(attachment);
+                self.show_info(&format!("Added attachment: {}", file_path));
+            }
+            Err(e) => {
+                self.show_error(&format!("Failed to read file {}: {}", file_path, e));
+            }
+        }
+        Ok(())
+    }
+
+    /// Remove the selected attachment from compose email
+    pub fn remove_selected_attachment(&mut self) -> AppResult<()> {
+        if let Some(idx) = self.selected_attachment_idx {
+            if idx < self.compose_email.attachments.len() {
+                let filename = self.compose_email.attachments[idx].filename.clone();
+                self.compose_email.attachments.remove(idx);
+                
+                // Adjust selection
+                if self.compose_email.attachments.is_empty() {
+                    self.selected_attachment_idx = None;
+                } else if idx >= self.compose_email.attachments.len() {
+                    self.selected_attachment_idx = Some(self.compose_email.attachments.len() - 1);
+                }
+                
+                self.show_info(&format!("Removed attachment: {}", filename));
+            }
+        } else {
+            self.show_info("No attachment selected");
+        }
+        Ok(())
     }
 
     /// Rotate to the next account and load its INBOX

@@ -147,7 +147,14 @@ fn render_email_list(f: &mut Frame, app: &App, area: Rect) {
                 }
             });
             
-            let content = format!("{:<12} {:<25} {}", date, from, email.subject);
+            let attachment_indicator = if !email.attachments.is_empty() {
+                "📎 "
+            } else {
+                ""
+            };
+            
+            let content = format!("{}{:<12} {:<25} {}", 
+                attachment_indicator, date, from, email.subject);
             ListItem::new(content).style(style)
         })
         .collect();
@@ -182,17 +189,87 @@ fn render_view_email_mode(f: &mut Frame, app: &App, area: Rect) {
         if idx < app.emails.len() {
             let email = &app.emails[idx];
             
+            // Determine layout based on whether there are attachments
+            let constraints = if email.attachments.is_empty() {
+                vec![
+                    Constraint::Length(6), // Header
+                    Constraint::Min(0),    // Body
+                ]
+            } else {
+                vec![
+                    Constraint::Length(6), // Header
+                    Constraint::Length(4 + email.attachments.len().min(5) as u16), // Attachments (max 5 visible)
+                    Constraint::Min(0),    // Body
+                ]
+            };
+            
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Length(6), // Header (increased for better display)
-                    Constraint::Min(0),    // Body
-                ])
+                .constraints(constraints)
                 .split(area);
             
             render_email_header(f, email, chunks[0]);
-            render_scrollable_email_body(f, email, chunks[1], app.email_view_scroll);
+            
+            if !email.attachments.is_empty() {
+                render_email_attachments(f, app, email, chunks[1]);
+                render_scrollable_email_body(f, email, chunks[2], app.email_view_scroll);
+            } else {
+                render_scrollable_email_body(f, email, chunks[1], app.email_view_scroll);
+            }
         }
+    }
+}
+
+fn render_email_attachments(f: &mut Frame, app: &App, email: &Email, area: Rect) {
+    let items: Vec<ListItem> = email
+        .attachments
+        .iter()
+        .enumerate()
+        .map(|(i, attachment)| {
+            let size = format_file_size(attachment.data.len());
+            let style = if Some(i) == app.selected_attachment_idx {
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Cyan)
+            };
+            
+            let content = format!("📎 {} ({}) - {}", 
+                attachment.filename, 
+                size, 
+                attachment.content_type
+            );
+            ListItem::new(content).style(style)
+        })
+        .collect();
+
+    let attachments = List::new(items)
+        .block(Block::default()
+            .title("Attachments (Tab to select, 's' to save)")
+            .borders(Borders::ALL))
+        .highlight_style(Style::default().add_modifier(Modifier::BOLD));
+
+    let mut state = ratatui::widgets::ListState::default();
+    if let Some(selected) = app.selected_attachment_idx {
+        state.select(Some(selected));
+    }
+
+    f.render_stateful_widget(attachments, area, &mut state);
+}
+
+fn format_file_size(bytes: usize) -> String {
+    const UNITS: &[&str] = &["B", "KB", "MB", "GB"];
+    let mut size = bytes as f64;
+    let mut unit_index = 0;
+    
+    while size >= 1024.0 && unit_index < UNITS.len() - 1 {
+        size /= 1024.0;
+        unit_index += 1;
+    }
+    
+    if unit_index == 0 {
+        format!("{} {}", bytes, UNITS[unit_index])
+    } else {
+        format!("{:.1} {}", size, UNITS[unit_index])
     }
 }
 
@@ -256,12 +333,23 @@ fn render_email_body(f: &mut Frame, email: &Email, area: Rect) {
 }
 
 fn render_compose_mode(f: &mut Frame, app: &App, area: Rect) {
+    // Determine layout based on whether there are attachments
+    let constraints = if app.compose_email.attachments.is_empty() {
+        vec![
+            Constraint::Length(8), // Header fields
+            Constraint::Min(0),    // Body
+        ]
+    } else {
+        vec![
+            Constraint::Length(8), // Header fields
+            Constraint::Length(4 + app.compose_email.attachments.len().min(3) as u16), // Attachments (max 3 visible)
+            Constraint::Min(0),    // Body
+        ]
+    };
+    
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(8), // Header fields (increased for better display)
-            Constraint::Min(0),    // Body
-        ])
+        .constraints(constraints)
         .split(area);
     
     // Render compose form header with field highlighting
@@ -309,6 +397,14 @@ fn render_compose_mode(f: &mut Frame, app: &App, area: Rect) {
     
     f.render_widget(header, chunks[0]);
     
+    // Render attachments if any
+    let body_chunk_idx = if app.compose_email.attachments.is_empty() {
+        1
+    } else {
+        render_compose_attachments(f, app, chunks[1]);
+        2
+    };
+    
     // Render compose form body with highlighting and cursor
     let content = app.compose_email.body_text.as_deref().unwrap_or("");
     
@@ -346,7 +442,44 @@ fn render_compose_mode(f: &mut Frame, app: &App, area: Rect) {
         .style(body_style)
         .wrap(Wrap { trim: false });
     
-    f.render_widget(body, chunks[1]);
+    f.render_widget(body, chunks[body_chunk_idx]);
+}
+
+fn render_compose_attachments(f: &mut Frame, app: &App, area: Rect) {
+    let items: Vec<ListItem> = app
+        .compose_email
+        .attachments
+        .iter()
+        .enumerate()
+        .map(|(i, attachment)| {
+            let size = format_file_size(attachment.data.len());
+            let style = if Some(i) == app.selected_attachment_idx {
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Green)
+            };
+            
+            let content = format!("📎 {} ({}) - {}", 
+                attachment.filename, 
+                size, 
+                attachment.content_type
+            );
+            ListItem::new(content).style(style)
+        })
+        .collect();
+
+    let attachments = List::new(items)
+        .block(Block::default()
+            .title("Attachments (Ctrl+A to add, Ctrl+X to remove)")
+            .borders(Borders::ALL))
+        .highlight_style(Style::default().add_modifier(Modifier::BOLD));
+
+    let mut state = ratatui::widgets::ListState::default();
+    if let Some(selected) = app.selected_attachment_idx {
+        state.select(Some(selected));
+    }
+
+    f.render_stateful_widget(attachments, area, &mut state);
 }
 
 fn render_folder_list_mode(f: &mut Frame, app: &App, area: Rect) {
@@ -450,11 +583,16 @@ fn render_help_mode(f: &mut Frame, _app: &App, area: Rect) {
         Line::from("  a - Reply to all"),
         Line::from("  f - Forward email"),
         Line::from("  d - Delete email"),
+        Line::from("  s - Save selected attachment"),
+        Line::from("  Tab - Select next attachment"),
         Line::from("  ↑↓ - Scroll email content"),
         Line::from(""),
         Line::from("Compose Mode:"),
         Line::from("  Esc - Cancel"),
         Line::from("  Ctrl+s - Send email"),
+        Line::from("  Ctrl+a - Add attachment"),
+        Line::from("  Ctrl+x - Remove selected attachment"),
+        Line::from("  Tab - Switch between fields"),
     ];
     
     let help = Paragraph::new(help_text)
