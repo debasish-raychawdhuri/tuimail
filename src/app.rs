@@ -701,6 +701,11 @@ impl App {
                 }
                 Ok(())
             }
+            KeyCode::Char('n') => {
+                // Rotate to next account
+                self.rotate_to_next_account()?;
+                Ok(())
+            }
             KeyCode::Delete => {
                 self.delete_selected_email()?;
                 Ok(())
@@ -1431,7 +1436,38 @@ impl App {
         Ok(())
     }
     
-    /// Delete the currently selected email using the current account
+    /// Rotate to the next account and load its INBOX
+    pub fn rotate_to_next_account(&mut self) -> AppResult<()> {
+        if self.config.accounts.len() <= 1 {
+            self.show_info("Only one account configured");
+            return Ok(());
+        }
+        
+        // Calculate next account index
+        let next_account_idx = (self.current_account_idx + 1) % self.config.accounts.len();
+        
+        // Switch to the next account
+        self.current_account_idx = next_account_idx;
+        
+        // Initialize the account if needed
+        self.ensure_account_initialized(next_account_idx)?;
+        
+        // Load INBOX for the new account
+        if let Err(e) = self.load_emails_for_account_folder(next_account_idx, "INBOX") {
+            self.show_error(&format!("Failed to load INBOX for account: {}", e));
+        } else {
+            let account_name = &self.config.accounts[next_account_idx].name;
+            self.show_info(&format!("Switched to account: {}", account_name));
+        }
+        
+        // Reset selection
+        self.selected_email_idx = if self.emails.is_empty() { None } else { Some(0) };
+        
+        // Rebuild folder items to reflect the new current account
+        self.rebuild_folder_items();
+        
+        Ok(())
+    }
     pub fn delete_selected_email(&mut self) -> AppResult<()> {
         if let Some(idx) = self.selected_email_idx {
             if idx >= self.emails.len() {

@@ -26,7 +26,20 @@ pub fn ui(f: &mut Frame, app: &App) {
 }
 
 fn render_title_bar(f: &mut Frame, app: &App, area: Rect) {
-    let titles = vec!["Inbox", "Compose", "Settings", "Help"];
+    // Get current account name for display
+    let current_account_name = if app.current_account_idx < app.config.accounts.len() {
+        &app.config.accounts[app.current_account_idx].name
+    } else {
+        "Unknown"
+    };
+    
+    let inbox_title = if app.config.accounts.len() > 1 {
+        format!("Inbox ({})", current_account_name)
+    } else {
+        "Inbox".to_string()
+    };
+    
+    let titles = vec![inbox_title.as_str(), "Compose", "Settings", "Help"];
     let tabs = Tabs::new(titles.iter().cloned().map(Line::from).collect())
         .block(Block::default().borders(Borders::BOTTOM))
         .highlight_style(Style::default().fg(Color::Yellow))
@@ -139,8 +152,20 @@ fn render_email_list(f: &mut Frame, app: &App, area: Rect) {
         })
         .collect();
 
+    // Create title showing current account and folder
+    let title = if app.config.accounts.len() > 1 {
+        let account_name = if app.current_account_idx < app.config.accounts.len() {
+            &app.config.accounts[app.current_account_idx].name
+        } else {
+            "Unknown"
+        };
+        format!("Emails - {} (INBOX)", account_name)
+    } else {
+        "Emails".to_string()
+    };
+
     let emails = List::new(items)
-        .block(Block::default().title("Emails").borders(Borders::ALL))
+        .block(Block::default().title(title).borders(Borders::ALL))
         .highlight_style(Style::default().add_modifier(Modifier::BOLD));
 
     // Add scrolling support
@@ -412,6 +437,7 @@ fn render_help_mode(f: &mut Frame, _app: &App, area: Rect) {
         Line::from("Normal Mode:"),
         Line::from("  c - Compose new email"),
         Line::from("  r - Refresh emails"),
+        Line::from("  n - Next account (rotate)"),
         Line::from("  f - Show folder list"),
         Line::from("  s - Show settings"),
         Line::from("  ↑/↓ - Navigate emails"),
@@ -452,6 +478,19 @@ fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
     // Show email count
     text.push_str(&format!("Emails: {} | ", app.emails.len()));
     
+    // Add account info if multiple accounts
+    if app.config.accounts.len() > 1 {
+        let account_name = if app.current_account_idx < app.config.accounts.len() {
+            &app.config.accounts[app.current_account_idx].name
+        } else {
+            "Unknown"
+        };
+        text.push_str(&format!("Account: {} ({}/{}) | ", 
+            account_name,
+            app.current_account_idx + 1, 
+            app.config.accounts.len()));
+    }
+    
     // Show sync status
     if app.is_syncing {
         text.push_str("Syncing... | ");
@@ -461,7 +500,7 @@ fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
     
     // Show current mode and help
     match app.mode {
-        AppMode::Normal => text.push_str("Press 'r' to refresh, 'f' for folders, 'c' to compose, '?' for help"),
+        AppMode::Normal => text.push_str("Press 'r' to refresh, 'n' for next account, 'f' for folders, 'c' to compose, '?' for help"),
         AppMode::FolderList => text.push_str("Use ↑↓ to navigate folders, Enter to select, Esc to cancel"),
         AppMode::Compose => text.push_str("Tab to switch fields, Ctrl+S to send, Esc to cancel"),
         AppMode::ViewEmail => text.push_str("r=Reply, a=Reply All, f=Forward, d=Delete, ↑↓=Scroll, Esc=Back"),
