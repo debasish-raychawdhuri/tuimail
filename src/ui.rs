@@ -528,7 +528,7 @@ fn render_file_browser(f: &mut Frame, app: &App, area: Rect) {
     // Render help text
     let help_text = if app.file_browser_save_mode {
         vec![
-            Line::from("↑↓: Navigate | Enter: Save Here | Backspace: Parent Dir | 's': Save Here | Esc: Cancel"),
+            Line::from("↑↓: Navigate | Enter: Save Here | 's': Save Here | 'q': Quick Save to Downloads | Esc: Cancel"),
         ]
     } else {
         vec![

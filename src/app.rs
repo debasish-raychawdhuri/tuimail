@@ -1588,6 +1588,24 @@ impl App {
                 }
                 Ok(())
             }
+            KeyCode::Char('q') if self.file_browser_save_mode => {
+                // Quick save to Downloads folder
+                let downloads_dir = std::env::var("HOME")
+                    .map(|home| std::path::PathBuf::from(format!("{}/Downloads", home)))
+                    .unwrap_or_else(|_| std::path::PathBuf::from("./downloads"));
+                
+                // Create Downloads directory if it doesn't exist
+                if let Err(e) = std::fs::create_dir_all(&downloads_dir) {
+                    self.show_error(&format!("Failed to create downloads directory: {}", e));
+                    return Ok(());
+                }
+                
+                let save_path = downloads_dir.join(&self.file_browser_save_filename);
+                self.save_attachment_to_path(&save_path)?;
+                self.file_browser_mode = false;
+                self.file_browser_save_mode = false;
+                Ok(())
+            }
             KeyCode::Char('s') if self.file_browser_save_mode => {
                 // Save with current filename in current directory
                 let save_path = self.file_browser_current_path.join(&self.file_browser_save_filename);
@@ -1613,6 +1631,8 @@ impl App {
     /// Load the current directory contents for file browser
     fn load_file_browser_directory(&mut self) -> AppResult<()> {
         self.file_browser_items.clear();
+        
+        println!("DEBUG: Loading directory: {}", self.file_browser_current_path.display());
         
         match std::fs::read_dir(&self.file_browser_current_path) {
             Ok(entries) => {
@@ -1654,6 +1674,8 @@ impl App {
                         });
                     }
                 }
+                
+                println!("DEBUG: Found {} items in directory", items.len());
                 
                 // Sort: directories first, then files, both alphabetically
                 items.sort_by(|a, b| {
@@ -1791,7 +1813,7 @@ impl App {
             self.file_browser_mode = true;
             self.load_file_browser_directory()?;
             self.file_browser_selected = 0;
-            self.show_info(&format!("Saving '{}' - Navigate to folder and press Enter or 's' to save", filename));
+            self.show_info("SAVE ATTACHMENT: Press 'q' for quick save to Downloads, or use ↑↓ to navigate folders then Enter to save");
         } else {
             self.show_error("No attachment selected");
         }
