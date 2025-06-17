@@ -587,15 +587,21 @@ impl Email {
         }
         
         // If we have a filename or it's marked as attachment, try to extract it
-        // Also treat non-text content types as potential attachments
+        // Also treat non-text content types as potential attachments, but exclude email body parts
         let is_likely_attachment = filename.is_some() || is_attachment || 
-            (!content_type.starts_with("text/") && 
+            (!content_type.starts_with("text/plain") && 
+             !content_type.starts_with("text/html") && 
              !content_type.starts_with("multipart/") && 
-             content_type != "application/octet-stream");
+             content_type != "application/octet-stream" &&
+             // Only treat as attachment if it has substantial content or explicit markers
+             (content_type.starts_with("application/") || 
+              content_type.starts_with("image/") || 
+              content_type.starts_with("audio/") || 
+              content_type.starts_with("video/")));
         
         if is_likely_attachment {
             let final_filename = filename.unwrap_or_else(|| {
-                // Generate filename based on content type
+                // Generate filename based on content type, but prefer meaningful names
                 match content_type.as_str() {
                     "application/pdf" => "document.pdf".to_string(),
                     "image/jpeg" => "image.jpg".to_string(),
@@ -604,7 +610,7 @@ impl Email {
                     "application/zip" => "archive.zip".to_string(),
                     "application/msword" => "document.doc".to_string(),
                     "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => "document.docx".to_string(),
-                    _ => "attachment".to_string(),
+                    _ => format!("attachment.{}", content_type.split('/').last().unwrap_or("bin")),
                 }
             });
             

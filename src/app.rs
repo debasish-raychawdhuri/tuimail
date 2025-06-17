@@ -132,6 +132,9 @@ pub struct App {
     pub file_browser_items: Vec<FileItem>, // Current directory contents
     pub file_browser_selected: usize, // Selected item in file browser
     pub file_browser_current_path: std::path::PathBuf, // Current directory
+    pub file_browser_save_mode: bool, // Whether we're saving (vs selecting for attach)
+    pub file_browser_save_filename: String, // Filename to save as
+    pub file_browser_save_data: Vec<u8>, // Data to save
 }
 
 impl App {
@@ -235,6 +238,9 @@ impl App {
             file_browser_current_path: std::env::var("HOME")
                 .map(|home| std::path::PathBuf::from(format!("{}/Downloads", home)))
                 .unwrap_or_else(|_| std::path::PathBuf::from(".")),
+            file_browser_save_mode: false,
+            file_browser_save_filename: String::new(),
+            file_browser_save_data: Vec::new(),
         }
     }
     
@@ -1561,12 +1567,27 @@ impl App {
                         self.load_file_browser_directory()?;
                         self.file_browser_selected = 0;
                     } else {
-                        // Select file for attachment
-                        let file_path = selected_item.path.to_string_lossy().to_string();
-                        self.add_attachment_from_path(&file_path)?;
+                        if self.file_browser_save_mode {
+                            // Save mode: use selected file's directory and name
+                            let save_path = selected_item.path.clone();
+                            self.save_attachment_to_path(&save_path)?;
+                        } else {
+                            // Select file for attachment
+                            let file_path = selected_item.path.to_string_lossy().to_string();
+                            self.add_attachment_from_path(&file_path)?;
+                        }
                         self.file_browser_mode = false;
+                        self.file_browser_save_mode = false;
                     }
                 }
+                Ok(())
+            }
+            KeyCode::Char('s') if self.file_browser_save_mode => {
+                // Save with current filename in current directory
+                let save_path = self.file_browser_current_path.join(&self.file_browser_save_filename);
+                self.save_attachment_to_path(&save_path)?;
+                self.file_browser_mode = false;
+                self.file_browser_save_mode = false;
                 Ok(())
             }
             KeyCode::Backspace => {
@@ -1689,59 +1710,7 @@ impl App {
 
     /// Save the selected attachment from the current email
     pub fn save_selected_attachment(&mut self) -> AppResult<()> {
-        if let Some(email_idx) = self.selected_email_idx {
-            if email_idx < self.emails.len() {
-                let email = &self.emails[email_idx];
-                
-                if email.attachments.is_empty() {
-                    self.show_info("No attachments in this email");
-                    return Ok(());
-                }
-                
-                let attachment_idx = self.selected_attachment_idx.unwrap_or(0);
-                if attachment_idx < email.attachments.len() {
-                    let attachment = &email.attachments[attachment_idx];
-                    
-                    // Create downloads directory if it doesn't exist
-                    let downloads_dir = std::env::var("HOME")
-                        .map(|home| format!("{}/Downloads", home))
-                        .unwrap_or_else(|_| "./downloads".to_string());
-                    
-                    if let Err(e) = std::fs::create_dir_all(&downloads_dir) {
-                        self.show_error(&format!("Failed to create downloads directory: {}", e));
-                        return Ok(());
-                    }
-                    
-                    // Generate unique filename if file already exists
-                    let mut file_path = format!("{}/{}", downloads_dir, attachment.filename);
-                    let mut counter = 1;
-                    while std::path::Path::new(&file_path).exists() {
-                        let (name, ext) = if let Some(dot_pos) = attachment.filename.rfind('.') {
-                            (&attachment.filename[..dot_pos], &attachment.filename[dot_pos..])
-                        } else {
-                            (attachment.filename.as_str(), "")
-                        };
-                        file_path = format!("{}/{}_{}{}", downloads_dir, name, counter, ext);
-                        counter += 1;
-                    }
-                    
-                    // Save the attachment
-                    match std::fs::write(&file_path, &attachment.data) {
-                        Ok(()) => {
-                            self.show_info(&format!("Saved attachment: {}", file_path));
-                        }
-                        Err(e) => {
-                            self.show_error(&format!("Failed to save attachment: {}", e));
-                        }
-                    }
-                } else {
-                    self.show_error("Invalid attachment selection");
-                }
-            }
-        } else {
-            self.show_error("No email selected");
-        }
-        Ok(())
+        self.save_attachment()
     }
     
     /// Select next attachment in the current email
@@ -1776,7 +1745,67 @@ impl App {
         }
     }
     
-    /// Add an attachment to the compose email
+    /// Get the currently selected email
+    fn get_current_email(&self) -> Option<&Email> {
+        if let Some(email_idx) = self.selected_email_idx {
+            if email_idx < self.emails.len() {
+                Some(&self.emails[email_idx])
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
+    
+    /// Save attachment with file browser
+    pub fn save_attachment(&mut self) -> AppResult<()> {
+        if let Some(attachment_idx) = self.selected_attachment_idx {
+            // Get attachment data first
+            let (filename, data) = if let Some(email) = self.get_current_email() {
+                if attachment_idx < email.attachments.len() {
+                    let attachment = &email.attachments[attachment_idx];
+                    (attachment.filename.clone(), attachment.data.clone())
+                } else {
+                    self.show_error("Invalid attachment index");
+                    return Ok(());
+                }
+            } else {
+                self.show_error("No email selected");
+                return Ok(());
+            };
+            
+            // Set up save mode
+            self.file_browser_save_mode = true;
+            self.file_browser_save_filename = filename.clone();
+            self.file_browser_save_data = data;
+            
+            // Enter file browser mode for saving
+            self.file_browser_mode = true;
+            self.load_file_browser_directory()?;
+            self.file_browser_selected = 0;
+            self.show_info(&format!("Choose location to save '{}' (Enter to select dir, 's' to save here)", filename));
+        } else {
+            self.show_error("No attachment selected");
+        }
+        Ok(())
+    }
+    
+    /// Save attachment data to specified path
+    fn save_attachment_to_path(&mut self, path: &std::path::Path) -> AppResult<()> {
+        match std::fs::write(path, &self.file_browser_save_data) {
+            Ok(_) => {
+                self.show_info(&format!("Attachment saved to: {}", path.display()));
+                // Clear save data
+                self.file_browser_save_data.clear();
+                self.file_browser_save_filename.clear();
+            }
+            Err(e) => {
+                self.show_error(&format!("Failed to save attachment: {}", e));
+            }
+        }
+        Ok(())
+    }
     pub fn add_attachment(&mut self) -> AppResult<()> {
         // Enter file browser mode
         self.file_browser_mode = true;

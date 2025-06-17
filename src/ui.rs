@@ -498,7 +498,11 @@ fn render_file_browser(f: &mut Frame, app: &App, area: Rect) {
     
     // Create the file browser title with current path
     let current_path = app.file_browser_current_path.to_string_lossy();
-    let title = format!("File Browser - {}", current_path);
+    let title = if app.file_browser_save_mode {
+        format!("Save '{}' - {}", app.file_browser_save_filename, current_path)
+    } else {
+        format!("File Browser - {}", current_path)
+    };
     
     let file_list = List::new(items)
         .block(Block::default()
@@ -522,9 +526,15 @@ fn render_file_browser(f: &mut Frame, app: &App, area: Rect) {
     f.render_stateful_widget(file_list, help_area[0], &mut state);
     
     // Render help text
-    let help_text = vec![
-        Line::from("↑↓: Navigate | Enter: Select/Open | Backspace: Parent Dir | Esc: Cancel"),
-    ];
+    let help_text = if app.file_browser_save_mode {
+        vec![
+            Line::from("↑↓: Navigate | Enter: Select Dir | Backspace: Parent Dir | 's': Save Here | Esc: Cancel"),
+        ]
+    } else {
+        vec![
+            Line::from("↑↓: Navigate | Enter: Select/Open | Backspace: Parent Dir | Esc: Cancel"),
+        ]
+    };
     
     let help = Paragraph::new(help_text)
         .block(Block::default().borders(Borders::TOP))
