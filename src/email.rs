@@ -426,12 +426,120 @@ impl Email {
             debug_log(&format!("Extracted HTML body: {} chars", html_body.len()));
         }
         
+        // Extract attachments
+        email.attachments = Self::extract_attachments(parsed);
+        debug_log(&format!("Extracted {} attachments", email.attachments.len()));
+        
         debug_log(&format!("Final email from addresses: {} total", email.from.len()));
         for (i, addr) in email.from.iter().enumerate() {
             debug_log(&format!("  Final From[{}]: name={:?}, address='{}'", i, addr.name, addr.address));
         }
         
         Ok(email)
+    }
+    
+    /// Extract attachments from a parsed email message
+    fn extract_attachments(parsed: &mail_parser::Message) -> Vec<EmailAttachment> {
+        let mut attachments = Vec::new();
+        
+        // Iterate through all parts of the message
+        for part in parsed.parts.iter() {
+            // Check if this part is an attachment
+            if let Some(attachment) = Self::extract_attachment_from_part(part) {
+                attachments.push(attachment);
+            }
+        }
+        
+        debug_log(&format!("Found {} attachments in email", attachments.len()));
+        attachments
+    }
+    
+    /// Extract attachment from a message part if it is an attachment
+    fn extract_attachment_from_part(part: &mail_parser::MessagePart) -> Option<EmailAttachment> {
+        // Check if this part has a filename (indicating it's an attachment)
+        let mut filename = None;
+        let mut content_type = "application/octet-stream".to_string();
+        
+        // Look through headers to find content-disposition and content-type
+        for header in &part.headers {
+            // Convert header name to string for comparison
+            let header_name_str = format!("{:?}", header.name).to_lowercase();
+            
+            let header_value = match &header.value {
+                mail_parser::HeaderValue::Text(text) => text.as_ref(),
+                mail_parser::HeaderValue::TextList(list) => {
+                    if let Some(first) = list.first() {
+                        first.as_ref()
+                    } else {
+                        continue;
+                    }
+                }
+                _ => continue,
+            };
+            
+            if header_name_str.contains("contentdisposition") || header_name_str.contains("content-disposition") {
+                // Simple parsing for filename parameter
+                if header_value.contains("attachment") || header_value.contains("inline") {
+                    if let Some(start) = header_value.find("filename=") {
+                        let filename_part = &header_value[start + 9..];
+                        let filename_part = filename_part.trim_start_matches('"');
+                        if let Some(end) = filename_part.find('"') {
+                            filename = Some(filename_part[..end].to_string());
+                        } else if let Some(end) = filename_part.find(';') {
+                            filename = Some(filename_part[..end].trim().to_string());
+                        } else {
+                            filename = Some(filename_part.trim().to_string());
+                        }
+                    }
+                }
+            } else if header_name_str.contains("contenttype") || header_name_str.contains("content-type") {
+                if let Some(semicolon_pos) = header_value.find(';') {
+                    content_type = header_value[..semicolon_pos].trim().to_string();
+                } else {
+                    content_type = header_value.trim().to_string();
+                }
+                
+                // Also check for name parameter in content-type
+                if filename.is_none() {
+                    if let Some(start) = header_value.find("name=") {
+                        let name_part = &header_value[start + 5..];
+                        let name_part = name_part.trim_start_matches('"');
+                        if let Some(end) = name_part.find('"') {
+                            filename = Some(name_part[..end].to_string());
+                        } else if let Some(end) = name_part.find(';') {
+                            filename = Some(name_part[..end].trim().to_string());
+                        } else {
+                            filename = Some(name_part.trim().to_string());
+                        }
+                    }
+                }
+            }
+        }
+        
+        if let Some(filename) = filename {
+            // Get the body data
+            let data = match &part.body {
+                mail_parser::PartType::Text(text) => text.as_bytes().to_vec(),
+                mail_parser::PartType::Html(html) => html.as_bytes().to_vec(),
+                mail_parser::PartType::Binary(binary) => binary.to_vec(),
+                mail_parser::PartType::InlineBinary(binary) => binary.to_vec(),
+                mail_parser::PartType::Message(_) => Vec::new(), // Skip nested messages for now
+                mail_parser::PartType::Multipart(_) => Vec::new(), // Skip multipart containers
+            };
+            
+            if !data.is_empty() {
+                debug_log(&format!("Found attachment: {} ({} bytes, {})", 
+                    filename, data.len(), content_type));
+                
+                return Some(EmailAttachment {
+                    filename,
+                    content_type,
+                    data,
+                });
+            }
+        }
+        
+        None
     }
 }
 
