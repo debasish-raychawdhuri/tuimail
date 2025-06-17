@@ -3,6 +3,7 @@ mod config;
 mod credentials;
 mod email;
 mod ui;
+mod test_parsing;
 
 use std::io::{self, Write};
 use std::time::Duration;
@@ -113,6 +114,13 @@ enum Commands {
 }
 
 fn main() -> Result<()> {
+    // Check for test mode first
+    let env_args: Vec<String> = std::env::args().collect();
+    if env_args.len() > 1 && env_args[1] == "--test-parsing" {
+        test_parsing::test_attachment_parsing();
+        return Ok(());
+    }
+    
     // Parse command line arguments
     let args = Args::parse();
     

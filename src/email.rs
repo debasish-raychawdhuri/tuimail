@@ -497,62 +497,90 @@ impl Email {
             // Convert header name to string for comparison
             let header_name_str = format!("{:?}", header.name).to_lowercase();
             
-            let header_value = match &header.value {
-                mail_parser::HeaderValue::Text(text) => text.as_ref(),
+            // Try different ways to extract header value
+            let header_value_str = match &header.value {
+                mail_parser::HeaderValue::Text(text) => {
+                    debug_log(&format!("Header value is Text: {}", text.as_ref()));
+                    Some(text.as_ref())
+                }
                 mail_parser::HeaderValue::TextList(list) => {
                     if let Some(first) = list.first() {
-                        first.as_ref()
+                        debug_log(&format!("Header value is TextList: {}", first.as_ref()));
+                        Some(first.as_ref())
                     } else {
-                        continue;
+                        debug_log("Header value is empty TextList");
+                        None
                     }
                 }
-                _ => continue,
+                _ => {
+                    debug_log(&format!("Header value is structured type: {:?}", header.value));
+                    None
+                }
             };
             
-            debug_log(&format!("Checking header: {} = {}", header_name_str, header_value));
-            
-            if header_name_str.contains("contentdisposition") || header_name_str.contains("content-disposition") {
-                debug_log("Found content-disposition header");
-                // Simple parsing for filename parameter
-                if header_value.contains("attachment") || header_value.contains("inline") {
-                    is_attachment = true;
-                    debug_log("Part is marked as attachment or inline");
+            // Handle structured headers specially
+            match &header.value {
+                mail_parser::HeaderValue::ContentType(ct) => {
+                    debug_log(&format!("Found structured ContentType: {:?}", ct));
+                    content_type = ct.ctype().to_string();
+                    debug_log(&format!("Extracted content type: {}", content_type));
                     
-                    if let Some(start) = header_value.find("filename=") {
-                        let filename_part = &header_value[start + 9..];
-                        let filename_part = filename_part.trim_start_matches('"');
-                        if let Some(end) = filename_part.find('"') {
-                            filename = Some(filename_part[..end].to_string());
-                        } else if let Some(end) = filename_part.find(';') {
-                            filename = Some(filename_part[..end].trim().to_string());
-                        } else {
-                            filename = Some(filename_part.trim().to_string());
-                        }
-                        debug_log(&format!("Extracted filename: {:?}", filename));
+                    // Check for name parameter in content-type
+                    if let Some(name) = ct.attribute("name") {
+                        filename = Some(name.to_string());
+                        debug_log(&format!("Found filename in content-type: {}", name));
                     }
                 }
-            } else if header_name_str.contains("contenttype") || header_name_str.contains("content-type") {
-                debug_log("Found content-type header");
-                if let Some(semicolon_pos) = header_value.find(';') {
-                    content_type = header_value[..semicolon_pos].trim().to_string();
-                } else {
-                    content_type = header_value.trim().to_string();
-                }
-                debug_log(&format!("Content type: {}", content_type));
-                
-                // Also check for name parameter in content-type
-                if filename.is_none() {
-                    if let Some(start) = header_value.find("name=") {
-                        let name_part = &header_value[start + 5..];
-                        let name_part = name_part.trim_start_matches('"');
-                        if let Some(end) = name_part.find('"') {
-                            filename = Some(name_part[..end].to_string());
-                        } else if let Some(end) = name_part.find(';') {
-                            filename = Some(name_part[..end].trim().to_string());
-                        } else {
-                            filename = Some(name_part.trim().to_string());
+                _ => {
+                    // Handle text-based headers
+                    if let Some(header_value) = header_value_str {
+                        debug_log(&format!("Checking header: {} = {}", header_name_str, header_value));
+                        
+                        if header_name_str.contains("contentdisposition") || header_name_str.contains("content-disposition") {
+                            debug_log("Found content-disposition header");
+                            // Simple parsing for filename parameter
+                            if header_value.contains("attachment") || header_value.contains("inline") {
+                                is_attachment = true;
+                                debug_log("Part is marked as attachment or inline");
+                                
+                                if let Some(start) = header_value.find("filename=") {
+                                    let filename_part = &header_value[start + 9..];
+                                    let filename_part = filename_part.trim_start_matches('"');
+                                    if let Some(end) = filename_part.find('"') {
+                                        filename = Some(filename_part[..end].to_string());
+                                    } else if let Some(end) = filename_part.find(';') {
+                                        filename = Some(filename_part[..end].trim().to_string());
+                                    } else {
+                                        filename = Some(filename_part.trim().to_string());
+                                    }
+                                    debug_log(&format!("Extracted filename: {:?}", filename));
+                                }
+                            }
+                        } else if header_name_str.contains("contenttype") || header_name_str.contains("content-type") {
+                            debug_log("Found content-type header");
+                            if let Some(semicolon_pos) = header_value.find(';') {
+                                content_type = header_value[..semicolon_pos].trim().to_string();
+                            } else {
+                                content_type = header_value.trim().to_string();
+                            }
+                            debug_log(&format!("Content type: {}", content_type));
+                            
+                            // Also check for name parameter in content-type
+                            if filename.is_none() {
+                                if let Some(start) = header_value.find("name=") {
+                                    let name_part = &header_value[start + 5..];
+                                    let name_part = name_part.trim_start_matches('"');
+                                    if let Some(end) = name_part.find('"') {
+                                        filename = Some(name_part[..end].to_string());
+                                    } else if let Some(end) = name_part.find(';') {
+                                        filename = Some(name_part[..end].trim().to_string());
+                                    } else {
+                                        filename = Some(name_part.trim().to_string());
+                                    }
+                                    debug_log(&format!("Extracted filename from content-type: {:?}", filename));
+                                }
+                            }
                         }
-                        debug_log(&format!("Extracted filename from content-type: {:?}", filename));
                     }
                 }
             }
