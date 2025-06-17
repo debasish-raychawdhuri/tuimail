@@ -13,12 +13,16 @@ use clap::{Parser, Subcommand};
 use crossterm::event::{self, Event, KeyEventKind};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
 use crossterm::ExecutableCommand;
+
+use crate::app::App;
+use crate::config::Config;
+use crate::credentials::SecureCredentials;
+use crate::email::EmailClient;
 use log::error;
 use ratatui::prelude::*;
 
-use crate::app::{App, AppResult, AppError};
-use crate::config::{Config, EmailAccount, ImapSecurity, SmtpSecurity};
-use crate::credentials::SecureCredentials;
+use crate::app::{AppResult, AppError};
+use crate::config::{EmailAccount, ImapSecurity, SmtpSecurity};
 use crate::ui::ui;
 
 /// Terminal-based email client with IMAP and SMTP support
@@ -92,6 +96,13 @@ enum Commands {
     
     /// List configured accounts
     ListAccounts,
+    
+    /// Test account connection
+    TestAccount {
+        /// Account index (starting from 0)
+        #[clap(short, long)]
+        index: usize,
+    },
     
     /// Set default account
     SetDefaultAccount {
@@ -223,6 +234,53 @@ fn main() -> Result<()> {
                         account.email,
                         if i == config.default_account { "default" } else { "" }
                     );
+                }
+                return Ok(());
+            }
+            Commands::TestAccount { index } => {
+                if index >= config.accounts.len() {
+                    eprintln!("Error: Account index {} not found. Use 'list-accounts' to see available accounts.", index);
+                    std::process::exit(1);
+                }
+                
+                let account = &config.accounts[index];
+                println!("Testing account: {} <{}>", account.name, account.email);
+                println!("IMAP Server: {}:{}", account.imap_server, account.imap_port);
+                
+                // Test credential retrieval
+                let credentials = SecureCredentials::new()
+                    .expect("Failed to initialize credential storage");
+                
+                match credentials.get_password(&account.email, "imap") {
+                    Ok(_password) => {
+                        println!("✓ Password found in credential store");
+                        
+                        // Test IMAP connection
+                        println!("Testing IMAP connection...");
+                        let client = EmailClient::new(account.clone(), credentials);
+                        
+                        match client.list_folders() {
+                            Ok(folders) => {
+                                println!("✓ IMAP connection successful!");
+                                println!("Found {} folders:", folders.len());
+                                for folder in folders.iter().take(5) {
+                                    println!("  - {}", folder);
+                                }
+                                if folders.len() > 5 {
+                                    println!("  ... and {} more", folders.len() - 5);
+                                }
+                            }
+                            Err(e) => {
+                                println!("✗ IMAP connection failed: {}", e);
+                                std::process::exit(1);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        println!("✗ Password not found: {}", e);
+                        println!("Please add the account password using 'add-account' command");
+                        std::process::exit(1);
+                    }
                 }
                 return Ok(());
             }
