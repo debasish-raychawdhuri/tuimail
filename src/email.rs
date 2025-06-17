@@ -16,6 +16,7 @@ use tokio::sync::mpsc;
 use serde::{Serialize, Deserialize};
 
 use crate::config::{EmailAccount, ImapSecurity, SmtpSecurity};
+use crate::credentials::SecureCredentials;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FolderMetadata {
@@ -399,10 +400,11 @@ impl Email {
 pub struct EmailClient {
     account: EmailAccount,
     cache_dir: String,
+    credentials: SecureCredentials,
 }
 
 impl EmailClient {
-    pub fn new(account: EmailAccount) -> Self {
+    pub fn new(account: EmailAccount, credentials: SecureCredentials) -> Self {
         init_debug_log();
         debug_log(&format!("Creating EmailClient for account: {}", account.email));
         
@@ -415,7 +417,7 @@ impl EmailClient {
             debug_log(&format!("Warning: Could not create cache directory {}: {}", cache_dir, e));
         }
         
-        Self { account, cache_dir }
+        Self { account, cache_dir, credentials }
     }
     
     fn get_cache_file(&self, folder: &str) -> String {
@@ -518,14 +520,15 @@ impl EmailClient {
         let domain = &self.account.imap_server;
         let port = self.account.imap_port;
         let username = &self.account.imap_username;
-        let password = &self.account.imap_password;
+        let password = self.account.get_imap_password(&self.credentials)
+            .map_err(|e| EmailError::ImapError(format!("Failed to get IMAP password: {}", e)))?;
         
         let tls = TlsConnector::builder().build()?;
         let client = imap::connect((domain.as_str(), port), domain, &tls)
             .map_err(|e| EmailError::ImapError(e.to_string()))?;
         
         let session = client
-            .login(username, password)
+            .login(username, &password)
             .map_err(|e| EmailError::ImapError(e.0.to_string()))?;
         
         Ok(session)
@@ -535,14 +538,15 @@ impl EmailClient {
         let domain = &self.account.imap_server;
         let port = self.account.imap_port;
         let username = &self.account.imap_username;
-        let password = &self.account.imap_password;
+        let password = self.account.get_imap_password(&self.credentials)
+            .map_err(|e| EmailError::ImapError(format!("Failed to get IMAP password: {}", e)))?;
         
         let tcp_stream = std::net::TcpStream::connect((domain.as_str(), port))
             .map_err(|e| EmailError::IoError(e))?;
         
         let client = imap::Client::new(tcp_stream);
         let session = client
-            .login(username, password)
+            .login(username, &password)
             .map_err(|e| EmailError::ImapError(e.0.to_string()))?;
         
         Ok(session)
@@ -644,8 +648,11 @@ impl EmailClient {
             &tls,
         ).map_err(|e| EmailError::ImapError(e.to_string()))?;
 
+        let password = self.account.get_imap_password(&self.credentials)
+            .map_err(|e| EmailError::ImapError(format!("Failed to get IMAP password: {}", e)))?;
+
         let mut session = client
-            .login(&self.account.imap_username, &self.account.imap_password)
+            .login(&self.account.imap_username, &password)
             .map_err(|e| EmailError::ImapError(e.0.to_string()))?;
 
         session
@@ -939,9 +946,12 @@ impl EmailClient {
             .map_err(|e| EmailError::SmtpError(e.to_string()))?;
         
         // Configure SMTP transport
+        let smtp_password = self.account.get_smtp_password(&self.credentials)
+            .map_err(|e| EmailError::SmtpError(format!("Failed to get SMTP password: {}", e)))?;
+            
         let creds = Credentials::new(
             self.account.smtp_username.clone(),
-            self.account.smtp_password.clone(),
+            smtp_password,
         );
         
         let mailer = match self.account.smtp_security {

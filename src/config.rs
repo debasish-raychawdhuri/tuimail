@@ -39,13 +39,41 @@ pub struct EmailAccount {
     pub imap_port: u16,
     pub imap_security: ImapSecurity,
     pub imap_username: String,
-    pub imap_password: String,
+    // Password removed from config - now stored securely
     pub smtp_server: String,
     pub smtp_port: u16,
     pub smtp_security: SmtpSecurity,
     pub smtp_username: String,
-    pub smtp_password: String,
+    // Password removed from config - now stored securely
     pub signature: Option<String>,
+}
+
+impl EmailAccount {
+    /// Get IMAP password from secure storage
+    pub fn get_imap_password(&self, credentials: &crate::credentials::SecureCredentials) -> Result<String> {
+        let account_id = &self.email;
+        credentials
+            .get_password(account_id, "imap")?
+            .ok_or_else(|| anyhow::anyhow!("IMAP password not found for {}", account_id))
+    }
+
+    /// Get SMTP password from secure storage
+    pub fn get_smtp_password(&self, credentials: &crate::credentials::SecureCredentials) -> Result<String> {
+        let account_id = &self.email;
+        credentials
+            .get_password(account_id, "smtp")?
+            .ok_or_else(|| anyhow::anyhow!("SMTP password not found for {}", account_id))
+    }
+
+    /// Store IMAP password securely
+    pub fn store_imap_password(&self, credentials: &crate::credentials::SecureCredentials, password: &str) -> Result<()> {
+        credentials.store_password(&self.email, "imap", password)
+    }
+
+    /// Store SMTP password securely
+    pub fn store_smtp_password(&self, credentials: &crate::credentials::SecureCredentials, password: &str) -> Result<()> {
+        credentials.store_password(&self.email, "smtp", password)
+    }
 }
 
 impl Default for EmailAccount {
@@ -57,12 +85,10 @@ impl Default for EmailAccount {
             imap_port: 993,
             imap_security: ImapSecurity::SSL,
             imap_username: "user@example.com".to_string(),
-            imap_password: "".to_string(),
             smtp_server: "smtp.example.com".to_string(),
             smtp_port: 587,
             smtp_security: SmtpSecurity::StartTLS,
             smtp_username: "user@example.com".to_string(),
-            smtp_password: "".to_string(),
             signature: Some("Sent from Email Client".to_string()),
         }
     }

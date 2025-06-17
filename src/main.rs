@@ -1,5 +1,6 @@
 mod app;
 mod config;
+mod credentials;
 mod email;
 mod ui;
 
@@ -17,6 +18,7 @@ use ratatui::prelude::*;
 
 use crate::app::{App, AppResult, AppError};
 use crate::config::{Config, EmailAccount, ImapSecurity, SmtpSecurity};
+use crate::credentials::SecureCredentials;
 use crate::ui::ui;
 
 /// Terminal-based email client with IMAP and SMTP support
@@ -147,6 +149,10 @@ fn main() -> Result<()> {
                 smtp_username,
                 smtp_password,
             } => {
+                // Initialize secure credential storage
+                let credentials = SecureCredentials::new()
+                    .context("Failed to initialize secure credential storage")?;
+
                 // Parse security settings
                 let imap_security = match imap_security.to_lowercase().as_str() {
                     "none" => ImapSecurity::None,
@@ -168,22 +174,26 @@ fn main() -> Result<()> {
                     }
                 };
                 
-                // Create account
+                // Create account (without passwords in config)
                 let account = EmailAccount {
                     name,
-                    email,
+                    email: email.clone(),
                     imap_server,
                     imap_port,
                     imap_security,
                     imap_username,
-                    imap_password,
                     smtp_server,
                     smtp_port,
                     smtp_security,
                     smtp_username,
-                    smtp_password,
                     signature: Some("Sent from Email Client".to_string()),
                 };
+
+                // Store passwords securely
+                account.store_imap_password(&credentials, &imap_password)
+                    .context("Failed to store IMAP password securely")?;
+                account.store_smtp_password(&credentials, &smtp_password)
+                    .context("Failed to store SMTP password securely")?;
                 
                 // Add account to config
                 config.accounts.push(account);
@@ -199,7 +209,7 @@ fn main() -> Result<()> {
                     return Ok(());
                 }
                 
-                println!("Account added successfully!");
+                println!("✓ Account added successfully with secure password storage!");
                 return Ok(());
             }
             Commands::ListAccounts => {
@@ -257,6 +267,12 @@ fn main() -> Result<()> {
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))
         .context("Failed to create terminal")?;
     
+    // Check if we need to migrate passwords from old config format
+    if let Err(e) = migrate_passwords_if_needed(&mut config, &config_path) {
+        println!("Warning: Failed to migrate passwords to secure storage: {}", e);
+        println!("You may need to re-add your accounts with secure password storage.");
+    }
+    
     // Create app state
     let mut app = App::new(config);
     
@@ -288,6 +304,65 @@ fn main() -> Result<()> {
     if let Err(err) = result {
         error!("Error: {:?}", err);
         println!("Error: {:?}", err);
+    }
+    
+    Ok(())
+}
+
+/// Migrate passwords from old config format to secure storage
+fn migrate_passwords_if_needed(config: &mut Config, config_path: &str) -> Result<()> {
+    // Check if any account has passwords in the config (old format)
+    let mut needs_migration = false;
+    let mut accounts_to_migrate = Vec::new();
+    
+    // Read the raw config file to check for password fields
+    if let Ok(config_content) = std::fs::read_to_string(config_path) {
+        if config_content.contains("imap_password") || config_content.contains("smtp_password") {
+            needs_migration = true;
+            
+            // Parse the old format to extract passwords
+            if let Ok(old_config_value) = serde_json::from_str::<serde_json::Value>(&config_content) {
+                if let Some(accounts) = old_config_value["accounts"].as_array() {
+                    for (i, account) in accounts.iter().enumerate() {
+                        if let (Some(email), Some(imap_pass), Some(smtp_pass)) = (
+                            account["email"].as_str(),
+                            account["imap_password"].as_str(),
+                            account["smtp_password"].as_str(),
+                        ) {
+                            accounts_to_migrate.push((i, email.to_string(), imap_pass.to_string(), smtp_pass.to_string()));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    if needs_migration && !accounts_to_migrate.is_empty() {
+        println!("🔐 Migrating passwords to secure storage...");
+        
+        let credentials = SecureCredentials::new()
+            .context("Failed to initialize secure credential storage")?;
+        
+        for (i, email, imap_password, smtp_password) in accounts_to_migrate {
+            if i < config.accounts.len() {
+                let account = &config.accounts[i];
+                
+                // Store passwords securely
+                account.store_imap_password(&credentials, &imap_password)
+                    .context(format!("Failed to store IMAP password for {}", email))?;
+                account.store_smtp_password(&credentials, &smtp_password)
+                    .context(format!("Failed to store SMTP password for {}", email))?;
+                
+                println!("✓ Migrated passwords for {}", email);
+            }
+        }
+        
+        // Save the updated config without passwords
+        config.save(config_path)
+            .context("Failed to save updated config after migration")?;
+        
+        println!("✓ Password migration completed successfully!");
+        println!("  Passwords are now stored securely in your system keyring.");
     }
     
     Ok(())

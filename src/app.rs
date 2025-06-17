@@ -6,6 +6,7 @@ use tokio::sync::mpsc;
 use thiserror::Error;
 
 use crate::config::Config;
+use crate::credentials::SecureCredentials;
 use crate::email::{Email, EmailClient, EmailFetcher};
 
 #[derive(Error, Debug)]
@@ -46,6 +47,7 @@ pub enum FocusPanel {
 
 pub struct App {
     pub config: Config,
+    pub credentials: SecureCredentials,
     pub should_quit: bool,
     pub mode: AppMode,
     pub focus: FocusPanel,
@@ -74,8 +76,12 @@ pub struct App {
 
 impl App {
     pub fn new(config: Config) -> Self {
+        let credentials = SecureCredentials::new()
+            .expect("Failed to initialize secure credential storage");
+            
         Self {
             config,
+            credentials,
             should_quit: false,
             mode: AppMode::Normal,
             focus: FocusPanel::EmailList,
@@ -149,7 +155,7 @@ impl App {
             }
         }
         
-        let email_client = EmailClient::new(account);
+        let email_client = EmailClient::new(account, self.credentials.clone());
         
         // Set up channels for email fetching
         let (tx, rx) = mpsc::channel(100);
