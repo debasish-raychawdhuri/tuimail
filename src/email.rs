@@ -7,7 +7,7 @@ use std::io::Write;
 use anyhow::Result;
 use chrono::{DateTime, Local, Utc};
 use imap::Session;
-use lettre::message::{Mailbox, MultiPart, SinglePart};
+use lettre::message::{Mailbox, MultiPart, SinglePart, Attachment};
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::{Address, Message, SmtpTransport, Transport};
 use native_tls::{TlsConnector, TlsStream};
@@ -943,6 +943,19 @@ impl EmailClient {
     }
     
     pub fn send_email(&self, email: &Email) -> Result<(), EmailError> {
+        // Debug: Log attachment info
+        if !email.attachments.is_empty() {
+            eprintln!("DEBUG: Sending email with {} attachments:", email.attachments.len());
+            for (i, attachment) in email.attachments.iter().enumerate() {
+                eprintln!("  {}: {} ({} bytes, {})", 
+                    i + 1, 
+                    attachment.filename, 
+                    attachment.data.len(), 
+                    attachment.content_type
+                );
+            }
+        }
+        
         let mut message_builder = Message::builder()
             .subject(&email.subject);
         
@@ -973,15 +986,33 @@ impl EmailClient {
             message_builder = message_builder.bcc(bcc.clone().into());
         }
         
-        // Build the email body
-        let multipart = MultiPart::alternative()
+        // Build the email body with attachments
+        let body_part = MultiPart::alternative()
             .singlepart(
                 SinglePart::plain(email.body_text.clone().unwrap_or_default())
             );
         
+        let final_multipart = if email.attachments.is_empty() {
+            // No attachments, just use the body
+            body_part
+        } else {
+            // Has attachments, create mixed multipart
+            let mut mixed_part = MultiPart::mixed()
+                .multipart(body_part);
+            
+            // Add attachments
+            for attachment in &email.attachments {
+                let attachment_part = Attachment::new(attachment.filename.clone())
+                    .body(attachment.data.clone(), attachment.content_type.parse().unwrap_or("application/octet-stream".parse().unwrap()));
+                mixed_part = mixed_part.singlepart(attachment_part);
+            }
+            
+            mixed_part
+        };
+        
         // Build the final message
         let message = message_builder
-            .multipart(multipart)
+            .multipart(final_multipart)
             .map_err(|e| EmailError::SmtpError(e.to_string()))?;
         
         // Configure SMTP transport

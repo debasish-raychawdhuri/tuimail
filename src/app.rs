@@ -1965,7 +1965,17 @@ impl App {
                 
                 match client.send_email(&self.compose_email) {
                     Ok(_) => {
-                        self.show_info("Email sent successfully");
+                        let attachment_count = self.compose_email.attachments.len();
+                        if attachment_count > 0 {
+                            self.show_info(&format!("Email sent successfully with {} attachment(s)", attachment_count));
+                        } else {
+                            self.show_info("Email sent successfully");
+                        }
+                        
+                        // Clear the compose form
+                        self.compose_email = crate::email::Email::new();
+                        self.compose_to_text.clear();
+                        
                         self.mode = AppMode::Normal;
                         self.focus = FocusPanel::EmailList;
                         Ok(())
