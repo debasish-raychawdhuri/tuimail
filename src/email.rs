@@ -522,7 +522,12 @@ impl Email {
             match &header.value {
                 mail_parser::HeaderValue::ContentType(ct) => {
                     debug_log(&format!("Found structured ContentType: {:?}", ct));
-                    content_type = ct.ctype().to_string();
+                    // Build full content type string
+                    if let Some(subtype) = ct.subtype() {
+                        content_type = format!("{}/{}", ct.ctype(), subtype);
+                    } else {
+                        content_type = ct.ctype().to_string();
+                    }
                     debug_log(&format!("Extracted content type: {}", content_type));
                     
                     // Check for name parameter in content-type
@@ -587,21 +592,16 @@ impl Email {
         }
         
         // If we have a filename or it's marked as attachment, try to extract it
-        // Also treat non-text content types as potential attachments, but exclude email body parts
-        let is_likely_attachment = filename.is_some() || is_attachment || 
-            (!content_type.starts_with("text/plain") && 
-             !content_type.starts_with("text/html") && 
+        // Be conservative: require explicit attachment markers or non-text content
+        let is_likely_attachment = is_attachment || 
+            (filename.is_some() && !content_type.starts_with("text/plain")) || 
+            (!content_type.starts_with("text/") && 
              !content_type.starts_with("multipart/") && 
-             content_type != "application/octet-stream" &&
-             // Only treat as attachment if it has substantial content or explicit markers
-             (content_type.starts_with("application/") || 
-              content_type.starts_with("image/") || 
-              content_type.starts_with("audio/") || 
-              content_type.starts_with("video/")));
+             content_type != "application/octet-stream");
         
         if is_likely_attachment {
             let final_filename = filename.unwrap_or_else(|| {
-                // Generate filename based on content type, but prefer meaningful names
+                // Generate filename based on content type
                 match content_type.as_str() {
                     "application/pdf" => "document.pdf".to_string(),
                     "image/jpeg" => "image.jpg".to_string(),
@@ -614,7 +614,8 @@ impl Email {
                 }
             });
             
-            debug_log(&format!("Treating as attachment: content_type={}, filename={}", content_type, final_filename));
+            debug_log(&format!("Treating as attachment: content_type={}, filename={}, is_attachment={}", 
+                content_type, final_filename, is_attachment));
             
             // Get the body data
             let data = match &part.body {
