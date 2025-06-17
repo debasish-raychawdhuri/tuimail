@@ -1,0 +1,1 @@
+This is a larger test file with more content to demonstrate file size display in the browser. It contains multiple lines and should show a reasonable file size.

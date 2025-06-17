@@ -333,6 +333,12 @@ fn render_email_body(f: &mut Frame, email: &Email, area: Rect) {
 }
 
 fn render_compose_mode(f: &mut Frame, app: &App, area: Rect) {
+    // If in file browser mode, show the file browser
+    if app.file_browser_mode {
+        render_file_browser(f, app, area);
+        return;
+    }
+    
     // If in attachment input mode, show the input dialog
     if app.attachment_input_mode {
         render_attachment_input_dialog(f, app, area);
@@ -449,6 +455,82 @@ fn render_compose_mode(f: &mut Frame, app: &App, area: Rect) {
         .wrap(Wrap { trim: false });
     
     f.render_widget(body, chunks[body_chunk_idx]);
+}
+
+fn render_file_browser(f: &mut Frame, app: &App, area: Rect) {
+    // Create a centered file browser
+    let browser_area = centered_rect(80, 80, area);
+    
+    // Clear the background
+    let clear = Block::default().style(Style::default().bg(Color::Black));
+    f.render_widget(clear, area);
+    
+    // Create file list items
+    let items: Vec<ListItem> = app
+        .file_browser_items
+        .iter()
+        .enumerate()
+        .map(|(i, item)| {
+            let style = if i == app.file_browser_selected {
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+            } else if item.is_directory {
+                Style::default().fg(Color::Cyan)
+            } else {
+                Style::default().fg(Color::White)
+            };
+            
+            let icon = if item.is_directory {
+                "📁"
+            } else {
+                "📄"
+            };
+            
+            let size_str = if let Some(size) = item.size {
+                format!(" ({})", format_file_size(size as usize))
+            } else {
+                String::new()
+            };
+            
+            let content = format!("{} {}{}", icon, item.name, size_str);
+            ListItem::new(content).style(style)
+        })
+        .collect();
+    
+    // Create the file browser title with current path
+    let current_path = app.file_browser_current_path.to_string_lossy();
+    let title = format!("File Browser - {}", current_path);
+    
+    let file_list = List::new(items)
+        .block(Block::default()
+            .title(title)
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Green)))
+        .highlight_style(Style::default().add_modifier(Modifier::BOLD));
+    
+    // Create help text
+    let help_area = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(0),     // File list
+            Constraint::Length(3),  // Help text
+        ])
+        .split(browser_area);
+    
+    let mut state = ratatui::widgets::ListState::default();
+    state.select(Some(app.file_browser_selected));
+    
+    f.render_stateful_widget(file_list, help_area[0], &mut state);
+    
+    // Render help text
+    let help_text = vec![
+        Line::from("↑↓: Navigate | Enter: Select/Open | Backspace: Parent Dir | Esc: Cancel"),
+    ];
+    
+    let help = Paragraph::new(help_text)
+        .block(Block::default().borders(Borders::TOP))
+        .style(Style::default().fg(Color::Gray));
+    
+    f.render_widget(help, help_area[1]);
 }
 
 fn render_attachment_input_dialog(f: &mut Frame, app: &App, area: Rect) {
@@ -636,7 +718,7 @@ fn render_help_mode(f: &mut Frame, _app: &App, area: Rect) {
         Line::from("Compose Mode:"),
         Line::from("  Esc - Cancel"),
         Line::from("  Ctrl+s - Send email"),
-        Line::from("  Ctrl+a - Add attachment"),
+        Line::from("  Ctrl+a - Add attachment (file browser)"),
         Line::from("  Ctrl+x - Remove selected attachment"),
         Line::from("  Tab - Switch between fields"),
     ];

@@ -26,6 +26,14 @@ pub enum ComposeField {
     Body,
 }
 
+#[derive(Debug, Clone)]
+pub struct FileItem {
+    pub name: String,
+    pub path: std::path::PathBuf,
+    pub is_directory: bool,
+    pub size: Option<u64>, // None for directories
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppMode {
     Normal,
@@ -120,6 +128,10 @@ pub struct App {
     pub selected_attachment_idx: Option<usize>, // For viewing attachments in received emails
     pub attachment_input_mode: bool, // Whether we're in file path input mode
     pub attachment_input_text: String, // File path being typed
+    pub file_browser_mode: bool, // Whether we're in file browser mode
+    pub file_browser_items: Vec<FileItem>, // Current directory contents
+    pub file_browser_selected: usize, // Selected item in file browser
+    pub file_browser_current_path: std::path::PathBuf, // Current directory
 }
 
 impl App {
@@ -217,6 +229,12 @@ impl App {
             selected_attachment_idx: None,
             attachment_input_mode: false,
             attachment_input_text: String::new(),
+            file_browser_mode: false,
+            file_browser_items: Vec::new(),
+            file_browser_selected: 0,
+            file_browser_current_path: std::env::var("HOME")
+                .map(|home| std::path::PathBuf::from(format!("{}/Downloads", home)))
+                .unwrap_or_else(|_| std::path::PathBuf::from(".")),
         }
     }
     
@@ -723,6 +741,11 @@ impl App {
     }
     
     fn handle_compose_mode(&mut self, key: KeyEvent) -> AppResult<()> {
+        // Handle file browser mode separately
+        if self.file_browser_mode {
+            return self.handle_file_browser_input(key);
+        }
+        
         // Handle attachment input mode separately
         if self.attachment_input_mode {
             return self.handle_attachment_input(key);
@@ -1507,6 +1530,123 @@ impl App {
         }
     }
 
+    /// Handle key input when in file browser mode
+    fn handle_file_browser_input(&mut self, key: KeyEvent) -> AppResult<()> {
+        match key.code {
+            KeyCode::Esc => {
+                // Exit file browser
+                self.file_browser_mode = false;
+                self.show_info("File browser cancelled");
+                Ok(())
+            }
+            KeyCode::Up => {
+                if self.file_browser_selected > 0 {
+                    self.file_browser_selected -= 1;
+                }
+                Ok(())
+            }
+            KeyCode::Down => {
+                if self.file_browser_selected < self.file_browser_items.len().saturating_sub(1) {
+                    self.file_browser_selected += 1;
+                }
+                Ok(())
+            }
+            KeyCode::Enter => {
+                if self.file_browser_selected < self.file_browser_items.len() {
+                    let selected_item = &self.file_browser_items[self.file_browser_selected];
+                    
+                    if selected_item.is_directory {
+                        // Navigate into directory
+                        self.file_browser_current_path = selected_item.path.clone();
+                        self.load_file_browser_directory()?;
+                        self.file_browser_selected = 0;
+                    } else {
+                        // Select file for attachment
+                        let file_path = selected_item.path.to_string_lossy().to_string();
+                        self.add_attachment_from_path(&file_path)?;
+                        self.file_browser_mode = false;
+                    }
+                }
+                Ok(())
+            }
+            KeyCode::Backspace => {
+                // Go to parent directory
+                if let Some(parent) = self.file_browser_current_path.parent() {
+                    self.file_browser_current_path = parent.to_path_buf();
+                    self.load_file_browser_directory()?;
+                    self.file_browser_selected = 0;
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Load the current directory contents for file browser
+    fn load_file_browser_directory(&mut self) -> AppResult<()> {
+        self.file_browser_items.clear();
+        
+        match std::fs::read_dir(&self.file_browser_current_path) {
+            Ok(entries) => {
+                let mut items = Vec::new();
+                
+                // Add parent directory entry if not at root
+                if self.file_browser_current_path.parent().is_some() {
+                    items.push(FileItem {
+                        name: "..".to_string(),
+                        path: self.file_browser_current_path.parent().unwrap().to_path_buf(),
+                        is_directory: true,
+                        size: None,
+                    });
+                }
+                
+                // Add directory entries
+                for entry in entries {
+                    if let Ok(entry) = entry {
+                        let path = entry.path();
+                        let name = entry.file_name().to_string_lossy().to_string();
+                        
+                        // Skip hidden files (starting with .)
+                        if name.starts_with('.') && name != ".." {
+                            continue;
+                        }
+                        
+                        let is_directory = path.is_dir();
+                        let size = if is_directory {
+                            None
+                        } else {
+                            std::fs::metadata(&path).ok().map(|m| m.len())
+                        };
+                        
+                        items.push(FileItem {
+                            name,
+                            path,
+                            is_directory,
+                            size,
+                        });
+                    }
+                }
+                
+                // Sort: directories first, then files, both alphabetically
+                items.sort_by(|a, b| {
+                    match (a.is_directory, b.is_directory) {
+                        (true, false) => std::cmp::Ordering::Less,
+                        (false, true) => std::cmp::Ordering::Greater,
+                        _ => a.name.cmp(&b.name),
+                    }
+                });
+                
+                self.file_browser_items = items;
+            }
+            Err(e) => {
+                self.show_error(&format!("Failed to read directory: {}", e));
+                self.file_browser_mode = false;
+            }
+        }
+        
+        Ok(())
+    }
+
     /// Handle key input when in attachment file path input mode
     fn handle_attachment_input(&mut self, key: KeyEvent) -> AppResult<()> {
         match key.code {
@@ -1638,10 +1778,11 @@ impl App {
     
     /// Add an attachment to the compose email
     pub fn add_attachment(&mut self) -> AppResult<()> {
-        // Enter attachment input mode
-        self.attachment_input_mode = true;
-        self.attachment_input_text.clear();
-        self.show_info("Enter file path to attach (Tab for ~/Downloads, Esc to cancel)");
+        // Enter file browser mode
+        self.file_browser_mode = true;
+        self.load_file_browser_directory()?;
+        self.file_browser_selected = 0;
+        self.show_info("Navigate with ↑↓, Enter to select, Backspace for parent dir, Esc to cancel");
         Ok(())
     }
     
