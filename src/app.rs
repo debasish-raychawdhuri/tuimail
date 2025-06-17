@@ -1436,6 +1436,39 @@ impl App {
         Ok(())
     }
     
+    /// Ensure the specified account is expanded in folder view
+    pub fn ensure_account_expanded(&mut self, account_idx: usize) {
+        // Find and expand the account if it's not already expanded
+        for item in &mut self.folder_items {
+            if let FolderItem::Account { index, expanded, .. } = item {
+                if *index == account_idx && !*expanded {
+                    *expanded = true;
+                    break;
+                }
+            }
+        }
+    }
+    fn select_inbox_folder_for_account(&mut self, account_idx: usize) {
+        for (i, item) in self.folder_items.iter().enumerate() {
+            if let FolderItem::Folder { account_index, name, .. } = item {
+                if *account_index == account_idx && (name == "INBOX" || name == "Inbox") {
+                    self.selected_folder_item_idx = i;
+                    return;
+                }
+            }
+        }
+        
+        // If INBOX not found, try to select the account itself
+        for (i, item) in self.folder_items.iter().enumerate() {
+            if let FolderItem::Account { index, .. } = item {
+                if *index == account_idx {
+                    self.selected_folder_item_idx = i;
+                    return;
+                }
+            }
+        }
+    }
+
     /// Rotate to the next account and load its INBOX
     pub fn rotate_to_next_account(&mut self) -> AppResult<()> {
         if self.config.accounts.len() <= 1 {
@@ -1463,8 +1496,14 @@ impl App {
         // Reset selection
         self.selected_email_idx = if self.emails.is_empty() { None } else { Some(0) };
         
+        // Ensure the new current account is expanded in folder view
+        self.ensure_account_expanded(next_account_idx);
+        
         // Rebuild folder items to reflect the new current account
         self.rebuild_folder_items();
+        
+        // Find and select the INBOX folder for the new account
+        self.select_inbox_folder_for_account(next_account_idx);
         
         Ok(())
     }
