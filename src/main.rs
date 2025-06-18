@@ -459,10 +459,31 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> AppResult<(
         return Err(e);
     }
     
+    // Start background email fetching for the current account
+    if let Err(e) = app.start_background_email_fetching(app.current_account_idx, "INBOX") {
+        // Log but don't fail - background fetching is optional
+        if std::env::var("EMAIL_DEBUG").is_ok() {
+            let log_file = "/tmp/tuimail_debug.log";
+            if let Ok(mut file) = std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .append(true)
+                .open(log_file) 
+            {
+                use std::io::Write;
+                let _ = writeln!(file, "[{}] Failed to start background email fetching: {}", 
+                    Local::now().format("%Y-%m-%d %H:%M:%S"), e);
+            }
+        }
+    }
+    
     let mut consecutive_errors = 0;
     const MAX_CONSECUTIVE_ERRORS: u32 = 10;
     
     loop {
+        // Check for new emails from background fetcher
+        app.check_for_new_emails();
+        
         // Draw UI
         if let Err(e) = terminal.draw(|frame| ui(frame, app)) {
             consecutive_errors += 1;
@@ -498,6 +519,8 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> AppResult<(
                     
                     // Check if we should exit
                     if app.should_quit {
+                        // Stop background email fetching before exiting
+                        app.stop_background_email_fetching();
                         return Ok(());
                     }
                 }

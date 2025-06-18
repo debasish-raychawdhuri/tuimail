@@ -136,6 +136,10 @@ pub struct App {
     pub file_browser_save_filename: String, // Filename to save as
     pub file_browser_save_data: Vec<u8>, // Data to save
     pub file_browser_editing_filename: bool, // Whether we're editing the filename
+    
+    // Background email fetching
+    pub email_receiver: Option<std::sync::mpsc::Receiver<Vec<crate::email::Email>>>,
+    pub fetcher_running: Option<std::sync::Arc<std::sync::Mutex<bool>>>,
 }
 
 impl App {
@@ -243,6 +247,10 @@ impl App {
             file_browser_save_filename: String::new(),
             file_browser_save_data: Vec::new(),
             file_browser_editing_filename: false,
+            
+            // Background email fetching
+            email_receiver: None,
+            fetcher_running: None,
         }
     }
     
@@ -2069,8 +2077,99 @@ impl App {
         // Find and select the INBOX folder for the new account
         self.select_inbox_folder_for_account(next_account_idx);
         
+        // Start background email fetching for the new account
+        if let Err(e) = self.start_background_email_fetching(next_account_idx, "INBOX") {
+            debug_log(&format!("Failed to start background email fetching: {}", e));
+        }
+        
         Ok(())
     }
+    
+    /// Start background email fetching with IDLE support
+    pub fn start_background_email_fetching(&mut self, account_idx: usize, folder: &str) -> AppResult<()> {
+        // Stop any existing fetcher
+        self.stop_background_email_fetching();
+        
+        if let Some(account_data) = self.accounts.get(&account_idx) {
+            if let Some(client) = &account_data.email_client {
+                // Check if server supports IDLE
+                if client.supports_idle() {
+                    debug_log("Starting background email fetching with IDLE support");
+                    
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    let running = std::sync::Arc::new(std::sync::Mutex::new(true));
+                    
+                    // Clone what we need for the background thread
+                    let client_clone = client.clone();
+                    let folder_clone = folder.to_string();
+                    let running_clone = running.clone();
+                    
+                    // Start background thread
+                    std::thread::spawn(move || {
+                        if let Err(e) = client_clone.run_idle_session(&folder_clone, &tx, &running_clone) {
+                            debug_log(&format!("IDLE session ended with error: {}", e));
+                        }
+                    });
+                    
+                    self.email_receiver = Some(rx);
+                    self.fetcher_running = Some(running);
+                    
+                    debug_log("Background email fetching started");
+                } else {
+                    debug_log("Server does not support IDLE, background fetching disabled");
+                }
+            }
+        }
+        
+        Ok(())
+    }
+    
+    /// Stop background email fetching
+    pub fn stop_background_email_fetching(&mut self) {
+        if let Some(running) = &self.fetcher_running {
+            if let Ok(mut running_guard) = running.lock() {
+                *running_guard = false;
+                debug_log("Stopped background email fetching");
+            }
+        }
+        self.email_receiver = None;
+        self.fetcher_running = None;
+    }
+    
+    /// Check for new emails from background fetcher
+    pub fn check_for_new_emails(&mut self) {
+        if let Some(receiver) = &self.email_receiver {
+            match receiver.try_recv() {
+                Ok(new_emails) => {
+                    debug_log(&format!("Received {} new emails from background fetcher", new_emails.len()));
+                    
+                    // Update the current email list
+                    self.emails = new_emails;
+                    
+                    // Update the account's cached emails
+                    if let Some(account_data) = self.accounts.get_mut(&self.current_account_idx) {
+                        account_data.emails = self.emails.clone();
+                    }
+                    
+                    // Reset selection if needed
+                    if self.selected_email_idx.is_none() && !self.emails.is_empty() {
+                        self.selected_email_idx = Some(0);
+                    }
+                    
+                    self.show_info("New emails received");
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    // No new emails, this is normal
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    debug_log("Background email fetcher disconnected");
+                    self.email_receiver = None;
+                    self.fetcher_running = None;
+                }
+            }
+        }
+    }
+    
     pub fn delete_selected_email(&mut self) -> AppResult<()> {
         if let Some(idx) = self.selected_email_idx {
             if idx >= self.emails.len() {

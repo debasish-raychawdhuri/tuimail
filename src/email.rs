@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::fs;
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -12,7 +12,6 @@ use lettre::transport::smtp::authentication::Credentials;
 use lettre::{Address, Message, SmtpTransport, Transport};
 use native_tls::{TlsConnector, TlsStream};
 use thiserror::Error;
-use tokio::sync::mpsc;
 use serde::{Serialize, Deserialize};
 
 use crate::config::{EmailAccount, ImapSecurity, SmtpSecurity};
@@ -1297,32 +1296,63 @@ impl EmailClient {
     }
     
     pub fn mark_as_read(&self, email: &Email) -> Result<(), EmailError> {
-        match self.account.imap_security {
-            ImapSecurity::SSL | ImapSecurity::StartTLS => {
-                let mut session = self.connect_imap_secure()?;
-                session
-                    .select(&email.folder)
-                    .map_err(|e| EmailError::ImapError(e.to_string()))?;
-                
-                session
-                    .store(&email.id, "+FLAGS (\\Seen)")
-                    .map_err(|e| EmailError::ImapError(e.to_string()))?;
-                
-                Ok(())
-            }
-            ImapSecurity::None => {
-                let mut session = self.connect_imap_plain()?;
-                session
-                    .select(&email.folder)
-                    .map_err(|e| EmailError::ImapError(e.to_string()))?;
-                
-                session
-                    .store(&email.id, "+FLAGS (\\Seen)")
-                    .map_err(|e| EmailError::ImapError(e.to_string()))?;
-                
-                Ok(())
+        debug_log(&format!("Marking email as read: {} in folder {}", email.id, email.folder));
+        
+        // Add retry logic for IMAP connection issues
+        let mut attempts = 0;
+        let max_attempts = 3;
+        
+        while attempts < max_attempts {
+            attempts += 1;
+            
+            let result = match self.account.imap_security {
+                ImapSecurity::SSL | ImapSecurity::StartTLS => {
+                    match self.connect_imap_secure() {
+                        Ok(mut session) => {
+                            match session.select(&email.folder) {
+                                Ok(_) => {
+                                    session.store(&email.id, "+FLAGS (\\Seen)")
+                                        .map_err(|e| EmailError::ImapError(e.to_string()))
+                                }
+                                Err(e) => Err(EmailError::ImapError(e.to_string()))
+                            }
+                        }
+                        Err(e) => Err(e)
+                    }
+                }
+                ImapSecurity::None => {
+                    match self.connect_imap_plain() {
+                        Ok(mut session) => {
+                            match session.select(&email.folder) {
+                                Ok(_) => {
+                                    session.store(&email.id, "+FLAGS (\\Seen)")
+                                        .map_err(|e| EmailError::ImapError(e.to_string()))
+                                }
+                                Err(e) => Err(EmailError::ImapError(e.to_string()))
+                            }
+                        }
+                        Err(e) => Err(e)
+                    }
+                }
+            };
+            
+            match result {
+                Ok(_) => {
+                    debug_log(&format!("Successfully marked email {} as read", email.id));
+                    return Ok(());
+                }
+                Err(e) => {
+                    debug_log(&format!("Attempt {} failed to mark email as read: {}", attempts, e));
+                    if attempts >= max_attempts {
+                        return Err(e);
+                    }
+                    // Wait a bit before retrying
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                }
             }
         }
+        
+        Err(EmailError::ImapError("Failed to mark email as read after retries".to_string()))
     }
     
     pub fn mark_as_unread(&self, email: &Email) -> Result<(), EmailError> {
@@ -1478,16 +1508,9 @@ impl EmailClient {
                             match self.fetch_emails(folder, 50) {
                                 Ok(emails) => {
                                     debug_log(&format!("IDLE session: fetched {} emails", emails.len()));
-                                    if let Err(e) = tx.try_send(emails) {
-                                        match e {
-                                            mpsc::error::TrySendError::Full(_) => {
-                                                debug_log("IDLE session: email channel full, skipping update");
-                                            }
-                                            mpsc::error::TrySendError::Closed(_) => {
-                                                debug_log("IDLE session: email channel closed, stopping");
-                                                return Ok(());
-                                            }
-                                        }
+                                    if let Err(e) = tx.send(emails) {
+                                        debug_log(&format!("IDLE session: email channel closed: {}", e));
+                                        return Ok(());
                                     } else {
                                         debug_log("IDLE session: emails sent to UI");
                                     }
@@ -1564,16 +1587,9 @@ impl EmailClient {
                             match self.fetch_emails(folder, 50) {
                                 Ok(emails) => {
                                     debug_log(&format!("IDLE session (plain): fetched {} emails", emails.len()));
-                                    if let Err(e) = tx.try_send(emails) {
-                                        match e {
-                                            mpsc::error::TrySendError::Full(_) => {
-                                                debug_log("IDLE session (plain): email channel full, skipping update");
-                                            }
-                                            mpsc::error::TrySendError::Closed(_) => {
-                                                debug_log("IDLE session (plain): email channel closed, stopping");
-                                                return Ok(());
-                                            }
-                                        }
+                                    if let Err(e) = tx.send(emails) {
+                                        debug_log(&format!("IDLE session (plain): email channel closed: {}", e));
+                                        return Ok(());
                                     } else {
                                         debug_log("IDLE session (plain): emails sent to UI");
                                     }
@@ -1686,19 +1702,11 @@ impl EmailFetcher {
                 // Fetch emails without holding the lock during network operations
                 match client.fetch_emails(&current_folder, 50) {
                     Ok(emails) => {
-                        // Try to send emails, but don't block if receiver is full
-                        if let Err(e) = tx.try_send(emails) {
-                            match e {
-                                mpsc::error::TrySendError::Full(_) => {
-                                    // Channel is full, skip this update
-                                    log::warn!("Email channel full, skipping update");
-                                }
-                                mpsc::error::TrySendError::Closed(_) => {
-                                    // Receiver is closed, exit the loop
-                                    log::info!("Email channel closed, stopping fetcher");
-                                    break;
-                                }
-                            }
+                        // Try to send emails
+                        if let Err(e) = tx.send(emails) {
+                            // Receiver is closed, exit the loop
+                            debug_log(&format!("Email channel closed: {}", e));
+                            break;
                         }
                     }
                     Err(e) => {
