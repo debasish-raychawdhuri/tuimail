@@ -156,7 +156,7 @@ fn render_email_list(f: &mut Frame, app: &App, area: Rect) {
             let attachment_indicator = if !email.attachments.is_empty() {
                 "📎 "
             } else {
-                ""
+                "  " // Two spaces to match the width of "📎 "
             };
             
             let content = format!("{}{:<12} {:<25} {}", 
