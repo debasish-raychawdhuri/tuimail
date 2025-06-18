@@ -492,9 +492,11 @@ impl Email {
         let mut is_attachment = false;
         
         // Look through headers to find content-disposition and content-type
-        for header in &part.headers {
+        debug_log(&format!("Processing {} headers for attachment detection", part.headers.len()));
+        for (header_idx, header) in part.headers.iter().enumerate() {
             // Convert header name to string for comparison
             let header_name_str = format!("{:?}", header.name).to_lowercase();
+            debug_log(&format!("Header {}: {} = {:?}", header_idx, header_name_str, header.value));
             
             // Try different ways to extract header value
             let header_value_str = match &header.value {
@@ -533,6 +535,13 @@ impl Email {
                     if let Some(name) = ct.attribute("name") {
                         filename = Some(name.to_string());
                         debug_log(&format!("Found filename in content-type: {}", name));
+                    }
+                    // Also check for filename parameter in content-type
+                    if filename.is_none() {
+                        if let Some(fname) = ct.attribute("filename") {
+                            filename = Some(fname.to_string());
+                            debug_log(&format!("Found filename parameter in content-type: {}", fname));
+                        }
                     }
                 }
                 _ => {
@@ -634,28 +643,25 @@ impl Email {
                 content_type, filename, is_attachment));
             
             let final_filename = filename.unwrap_or_else(|| {
-                debug_log("No filename found in headers, generating fallback filename");
-                // Generate filename based on content type with timestamp for uniqueness
-                let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
-                let fallback_name = match content_type.as_str() {
-                    "application/pdf" => format!("document_{}.pdf", timestamp),
-                    "image/jpeg" => format!("image_{}.jpg", timestamp),
-                    "image/png" => format!("image_{}.png", timestamp),
-                    "image/gif" => format!("image_{}.gif", timestamp),
-                    "application/zip" => format!("archive_{}.zip", timestamp),
-                    "application/msword" => format!("document_{}.doc", timestamp),
-                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => format!("document_{}.docx", timestamp),
-                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => format!("spreadsheet_{}.xlsx", timestamp),
-                    "application/vnd.ms-excel" => format!("spreadsheet_{}.xls", timestamp),
-                    "text/plain" => format!("text_{}.txt", timestamp),
-                    "text/csv" => format!("data_{}.csv", timestamp),
+                debug_log("WARNING: No filename found in email headers - this should not happen for proper attachments");
+                // Only use simple fallback - the real fix is to extract the filename properly
+                match content_type.as_str() {
+                    "application/pdf" => "document.pdf".to_string(),
+                    "image/jpeg" => "image.jpg".to_string(),
+                    "image/png" => "image.png".to_string(),
+                    "image/gif" => "image.gif".to_string(),
+                    "application/zip" => "archive.zip".to_string(),
+                    "application/msword" => "document.doc".to_string(),
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => "document.docx".to_string(),
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => "spreadsheet.xlsx".to_string(),
+                    "application/vnd.ms-excel" => "spreadsheet.xls".to_string(),
+                    "text/plain" => "text.txt".to_string(),
+                    "text/csv" => "data.csv".to_string(),
                     _ => {
                         let extension = content_type.split('/').last().unwrap_or("bin");
-                        format!("attachment_{}.{}", timestamp, extension)
+                        format!("attachment.{}", extension)
                     }
-                };
-                debug_log(&format!("Generated fallback filename: {}", fallback_name));
-                fallback_name
+                }
             });
             
             debug_log(&format!("Treating as attachment: content_type={}, filename={}, is_attachment={}", 
