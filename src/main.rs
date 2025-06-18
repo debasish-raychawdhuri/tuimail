@@ -1,6 +1,7 @@
 mod app;
 mod config;
 mod credentials;
+mod database;
 mod email;
 mod ui;
 mod test_parsing;

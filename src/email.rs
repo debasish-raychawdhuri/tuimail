@@ -16,6 +16,7 @@ use serde::{Serialize, Deserialize};
 
 use crate::config::{EmailAccount, ImapSecurity, SmtpSecurity};
 use crate::credentials::SecureCredentials;
+use crate::database::EmailDatabase;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FolderMetadata {
@@ -139,6 +140,9 @@ pub enum EmailError {
     
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
+    
+    #[error("Connection error: {0}")]
+    ConnectionError(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -723,6 +727,7 @@ pub struct EmailClient {
     account: EmailAccount,
     cache_dir: String,
     credentials: SecureCredentials,
+    db_path: std::path::PathBuf,
 }
 
 impl EmailClient {
@@ -738,52 +743,93 @@ impl EmailClient {
         if let Err(e) = fs::create_dir_all(&cache_dir) {
             debug_log(&format!("Warning: Could not create cache directory {}: {}", cache_dir, e));
         }
+
+        // Set up database path
+        let db_path = std::path::PathBuf::from(&cache_dir).join("emails.db");
         
-        Self { account, cache_dir, credentials }
+        Self { account, cache_dir, credentials, db_path }
     }
     
-    fn get_cache_file(&self, folder: &str) -> String {
-        format!("{}/{}.json", self.cache_dir, folder.replace('/', "_"))
-    }
-    
-    fn get_metadata_file(&self, folder: &str) -> String {
-        format!("{}/{}_metadata.json", self.cache_dir, folder.replace('/', "_"))
+    fn get_database(&self) -> Result<EmailDatabase, EmailError> {
+        EmailDatabase::new(&self.db_path)
+            .map_err(|e| EmailError::ConnectionError(format!("Database error: {}", e)))
     }
     
     fn load_folder_metadata(&self, folder: &str) -> FolderMetadata {
-        let metadata_file = self.get_metadata_file(folder);
-        if let Ok(content) = fs::read_to_string(&metadata_file) {
-            if let Ok(metadata) = serde_json::from_str::<FolderMetadata>(&content) {
-                return metadata;
+        match self.get_database() {
+            Ok(db) => {
+                match db.load_folder_metadata(&self.account.email, folder) {
+                    Ok((last_uid, total_messages, _last_sync)) => {
+                        debug_log(&format!("Loaded metadata from database: last_uid={}, total_messages={}", last_uid, total_messages));
+                        FolderMetadata {
+                            last_uid,
+                            total_messages,
+                            last_sync: Local::now(),
+                            downloaded_uids: std::collections::HashSet::new(),
+                        }
+                    }
+                    Err(e) => {
+                        debug_log(&format!("Failed to load metadata from database: {}", e));
+                        FolderMetadata::new()
+                    }
+                }
+            }
+            Err(e) => {
+                debug_log(&format!("Failed to open database for metadata: {}", e));
+                FolderMetadata::new()
             }
         }
-        FolderMetadata::new()
     }
     
     fn save_folder_metadata(&self, folder: &str, metadata: &FolderMetadata) {
-        let metadata_file = self.get_metadata_file(folder);
-        if let Ok(content) = serde_json::to_string_pretty(metadata) {
-            if let Err(e) = fs::write(&metadata_file, content) {
-                debug_log(&format!("Warning: Could not save folder metadata: {}", e));
+        match self.get_database() {
+            Ok(db) => {
+                if let Err(e) = db.save_folder_metadata(&self.account.email, folder, metadata.last_uid, metadata.total_messages) {
+                    debug_log(&format!("Warning: Could not save folder metadata to database: {}", e));
+                } else {
+                    debug_log(&format!("Saved metadata to database: last_uid={}, total_messages={}", metadata.last_uid, metadata.total_messages));
+                }
+            }
+            Err(e) => {
+                debug_log(&format!("Failed to open database for saving metadata: {}", e));
             }
         }
     }
     
     fn load_cached_emails(&self, folder: &str) -> Vec<Email> {
-        let cache_file = self.get_cache_file(folder);
-        if let Ok(content) = fs::read_to_string(&cache_file) {
-            if let Ok(emails) = serde_json::from_str::<Vec<Email>>(&content) {
-                return emails;
+        match self.get_database() {
+            Ok(db) => {
+                match db.load_emails(&self.account.email, folder) {
+                    Ok(emails) => {
+                        debug_log(&format!("Loaded {} emails from database for folder: {}", emails.len(), folder));
+                        emails
+                    }
+                    Err(e) => {
+                        debug_log(&format!("Failed to load emails from database: {}", e));
+                        Vec::new()
+                    }
+                }
+            }
+            Err(e) => {
+                debug_log(&format!("Failed to open database: {}", e));
+                Vec::new()
             }
         }
-        Vec::new()
     }
     
     fn save_cached_emails(&self, folder: &str, emails: &[Email]) {
-        let cache_file = self.get_cache_file(folder);
-        if let Ok(content) = serde_json::to_string_pretty(emails) {
-            if let Err(e) = fs::write(&cache_file, content) {
-                log::warn!("Could not save email cache: {}", e);
+        match self.get_database() {
+            Ok(db) => {
+                if let Err(e) = db.save_emails(&self.account.email, folder, emails) {
+                    log::warn!("Could not save emails to database: {}", e);
+                    debug_log(&format!("Database save error: {}", e));
+                } else {
+                    debug_log(&format!("Saved {} emails to database for folder: {}", emails.len(), folder));
+                }
+            }
+            Err(e) => {
+                log::warn!("Could not open database for saving: {}", e);
+                debug_log(&format!("Database open error: {}", e));
             }
         }
     }

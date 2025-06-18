@@ -18,6 +18,9 @@ native-tls = "0.2"
 lettre = { version = "0.10", features = ["builder", "smtp-transport", "tokio1-native-tls"] }
 mail-parser = "0.8"
 
+# Database
+rusqlite = { version = "0.30", features = ["bundled", "chrono", "serde_json"] }
+
 # Async runtime
 tokio = { version = "1.32", features = ["full"] }
 
