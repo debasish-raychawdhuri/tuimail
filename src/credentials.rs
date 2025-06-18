@@ -85,7 +85,7 @@ impl FallbackCredentialManager {
     pub fn new() -> Result<Self> {
         let config_dir = dirs::config_dir()
             .context("Failed to get config directory")?
-            .join("email_client")
+            .join("tuimail")
             .join("credentials");
         
         std::fs::create_dir_all(&config_dir)

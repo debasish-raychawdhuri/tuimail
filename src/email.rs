@@ -40,7 +40,7 @@ impl FolderMetadata {
 // Helper function to log debug information to a file
 pub fn debug_log(message: &str) {
     if std::env::var("EMAIL_DEBUG").is_ok() {
-        let log_file = "/tmp/email_client_debug.log";
+        let log_file = "/tmp/tuimail_debug.log";
         if let Ok(mut file) = OpenOptions::new()
             .create(true)
             .append(true)
@@ -55,7 +55,7 @@ pub fn debug_log(message: &str) {
 // Helper function to initialize debug logging
 fn init_debug_log() {
     if std::env::var("EMAIL_DEBUG").is_ok() {
-        let log_file = "/tmp/email_client_debug.log";
+        let log_file = "/tmp/tuimail_debug.log";
         if let Ok(mut file) = OpenOptions::new()
             .create(true)
             .write(true)
@@ -680,7 +680,7 @@ impl EmailClient {
         init_debug_log();
         debug_log(&format!("Creating EmailClient for account: {}", account.email));
         
-        let cache_dir = format!("{}/.cache/email_client/{}", 
+        let cache_dir = format!("{}/.cache/tuimail/{}", 
             dirs::home_dir().unwrap_or_default().display(), 
             account.email.replace('@', "_at_").replace('.', "_"));
         

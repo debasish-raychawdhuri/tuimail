@@ -142,7 +142,7 @@ impl App {
     pub fn new(config: Config) -> Self {
         // Debug logging
         if std::env::var("EMAIL_DEBUG").is_ok() {
-            let log_file = "/tmp/email_client_debug.log";
+            let log_file = "/tmp/tuimail_debug.log";
             if let Ok(mut file) = std::fs::OpenOptions::new()
                 .create(true)
                 .write(true)
@@ -187,7 +187,7 @@ impl App {
         
         // Debug logging
         if std::env::var("EMAIL_DEBUG").is_ok() {
-            let log_file = "/tmp/email_client_debug.log";
+            let log_file = "/tmp/tuimail_debug.log";
             if let Ok(mut file) = std::fs::OpenOptions::new()
                 .create(true)
                 .write(true)
@@ -339,7 +339,7 @@ impl App {
     pub fn init_account(&mut self, account_idx: usize) -> AppResult<()> {
         // Debug logging
         if std::env::var("EMAIL_DEBUG").is_ok() {
-            let log_file = "/tmp/email_client_debug.log";
+            let log_file = "/tmp/tuimail_debug.log";
             if let Ok(mut file) = std::fs::OpenOptions::new()
                 .create(true)
                 .write(true)
@@ -362,7 +362,7 @@ impl App {
         
         // Debug logging
         if std::env::var("EMAIL_DEBUG").is_ok() {
-            let log_file = "/tmp/email_client_debug.log";
+            let log_file = "/tmp/tuimail_debug.log";
             if let Ok(mut file) = std::fs::OpenOptions::new()
                 .create(true)
                 .write(true)
@@ -395,7 +395,7 @@ impl App {
     pub fn load_folders_for_account(&mut self, account_idx: usize) -> AppResult<()> {
         // Debug logging
         if std::env::var("EMAIL_DEBUG").is_ok() {
-            let log_file = "/tmp/email_client_debug.log";
+            let log_file = "/tmp/tuimail_debug.log";
             if let Ok(mut file) = std::fs::OpenOptions::new()
                 .create(true)
                 .write(true)
@@ -414,7 +414,7 @@ impl App {
                     Ok(folders) => {
                         // Debug logging
                         if std::env::var("EMAIL_DEBUG").is_ok() {
-                            let log_file = "/tmp/email_client_debug.log";
+                            let log_file = "/tmp/tuimail_debug.log";
                             if let Ok(mut file) = std::fs::OpenOptions::new()
                                 .create(true)
                                 .write(true)
@@ -434,7 +434,7 @@ impl App {
                     Err(e) => {
                         // Debug logging
                         if std::env::var("EMAIL_DEBUG").is_ok() {
-                            let log_file = "/tmp/email_client_debug.log";
+                            let log_file = "/tmp/tuimail_debug.log";
                             if let Ok(mut file) = std::fs::OpenOptions::new()
                                 .create(true)
                                 .write(true)
@@ -501,7 +501,7 @@ impl App {
             
             // Debug logging
             if std::env::var("EMAIL_DEBUG").is_ok() {
-                let log_file = "/tmp/email_client_debug.log";
+                let log_file = "/tmp/tuimail_debug.log";
                 if let Ok(mut file) = std::fs::OpenOptions::new()
                     .create(true)
                     .write(true)
@@ -574,7 +574,7 @@ impl App {
     pub fn init(&mut self) -> AppResult<()> {
         // Debug logging
         if std::env::var("EMAIL_DEBUG").is_ok() {
-            let log_file = "/tmp/email_client_debug.log";
+            let log_file = "/tmp/tuimail_debug.log";
             if let Ok(mut file) = std::fs::OpenOptions::new()
                 .create(true)
                 .write(true)
@@ -599,7 +599,7 @@ impl App {
             Ok(()) => {
                 // Debug logging
                 if std::env::var("EMAIL_DEBUG").is_ok() {
-                    let log_file = "/tmp/email_client_debug.log";
+                    let log_file = "/tmp/tuimail_debug.log";
                     if let Ok(mut file) = std::fs::OpenOptions::new()
                         .create(true)
                         .write(true)
@@ -618,7 +618,7 @@ impl App {
                 
                 // Debug logging
                 if std::env::var("EMAIL_DEBUG").is_ok() {
-                    let log_file = "/tmp/email_client_debug.log";
+                    let log_file = "/tmp/tuimail_debug.log";
                     if let Ok(mut file) = std::fs::OpenOptions::new()
                         .create(true)
                         .write(true)
@@ -1241,7 +1241,7 @@ impl App {
                 if let Ok(mut file) = std::fs::OpenOptions::new()
                     .create(true)
                     .append(true)
-                    .open("/tmp/email_client_debug.log") {
+                    .open("/tmp/tuimail_debug.log") {
                     use std::io::Write;
                     let _ = writeln!(file, "[{}] {}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"), debug_msg);
                 }

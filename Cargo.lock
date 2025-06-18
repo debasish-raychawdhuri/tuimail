@@ -644,31 +644,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e079f19b08ca6239f47f8ba8509c11cf3ea30095831f7fed61441475edd8c449"
 
 [[package]]
-name = "email_client"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "clap",
- "crossterm",
- "dirs",
- "env_logger",
- "imap",
- "keyring",
- "lettre",
- "log",
- "mail-parser",
- "native-tls",
- "ratatui",
- "serde",
- "serde_bytes",
- "serde_json",
- "shellexpand",
- "thiserror",
- "tokio",
-]
-
-[[package]]
 name = "encoding_rs"
 version = "0.8.35"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2278,6 +2253,31 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b9d12581f227e93f094d3af2ae690a574abb8a2b9b7a96e7cfe9647b2b617678"
 dependencies = [
  "once_cell",
+]
+
+[[package]]
+name = "tuimail"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "crossterm",
+ "dirs",
+ "env_logger",
+ "imap",
+ "keyring",
+ "lettre",
+ "log",
+ "mail-parser",
+ "native-tls",
+ "ratatui",
+ "serde",
+ "serde_bytes",
+ "serde_json",
+ "shellexpand",
+ "thiserror",
+ "tokio",
 ]
 
 [[package]]

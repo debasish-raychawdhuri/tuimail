@@ -31,7 +31,7 @@ use crate::ui::ui;
 #[clap(author, version, about)]
 struct Args {
     /// Path to config file
-    #[clap(short, long, default_value = "~/.config/email_client/config.json")]
+    #[clap(short, long, default_value = "~/.config/tuimail/config.json")]
     config: String,
     
     /// Enable debug logging
@@ -126,7 +126,7 @@ fn main() -> Result<()> {
     
     // Initialize debug logging early if EMAIL_DEBUG is set
     if std::env::var("EMAIL_DEBUG").is_ok() {
-        let log_file = "/tmp/email_client_debug.log";
+        let log_file = "/tmp/tuimail_debug.log";
         if let Ok(mut file) = std::fs::OpenOptions::new()
             .create(true)
             .write(true)
@@ -318,7 +318,7 @@ fn main() -> Result<()> {
     // Check if we have any accounts configured
     if config.accounts.is_empty() {
         println!("No email accounts configured. Please add an account first:");
-        println!("  email_client add-account --help");
+        println!("  tuimail add-account --help");
         return Ok(());
     }
     
@@ -349,7 +349,7 @@ fn main() -> Result<()> {
     
     // Debug logging
     if std::env::var("EMAIL_DEBUG").is_ok() {
-        let log_file = "/tmp/email_client_debug.log";
+        let log_file = "/tmp/tuimail_debug.log";
         if let Ok(mut file) = std::fs::OpenOptions::new()
             .create(true)
             .write(true)
@@ -444,7 +444,7 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> AppResult<(
     if let Err(e) = app.init() {
         // Log the error to debug file if debug is enabled
         if std::env::var("EMAIL_DEBUG").is_ok() {
-            let log_file = "/tmp/email_client_debug.log";
+            let log_file = "/tmp/tuimail_debug.log";
             if let Ok(mut file) = std::fs::OpenOptions::new()
                 .create(true)
                 .write(true)
