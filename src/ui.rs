@@ -470,10 +470,9 @@ fn render_file_browser(f: &mut Frame, app: &App, area: Rect) {
         .file_browser_items
         .iter()
         .enumerate()
-        .map(|(i, item)| {
-            let style = if i == app.file_browser_selected {
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
-            } else if item.is_directory {
+        .map(|(_i, item)| {
+            // Don't apply selection styling here - let the List widget handle it
+            let style = if item.is_directory {
                 Style::default().fg(Color::Cyan)
             } else {
                 Style::default().fg(Color::White)
@@ -499,7 +498,11 @@ fn render_file_browser(f: &mut Frame, app: &App, area: Rect) {
     // Create the file browser title with current path
     let current_path = app.file_browser_current_path.to_string_lossy();
     let title = if app.file_browser_save_mode {
-        format!("Save '{}' - {}", app.file_browser_save_filename, current_path)
+        if app.file_browser_editing_filename {
+            format!("Save as: {} - {}", app.file_browser_save_filename, current_path)
+        } else {
+            format!("Save '{}' - {}", app.file_browser_save_filename, current_path)
+        }
     } else {
         format!("File Browser - {}", current_path)
     };
@@ -509,7 +512,7 @@ fn render_file_browser(f: &mut Frame, app: &App, area: Rect) {
             .title(title)
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Green)))
-        .highlight_style(Style::default().add_modifier(Modifier::BOLD));
+        .highlight_style(Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD));
     
     // Create help text
     let help_area = Layout::default()
@@ -527,9 +530,15 @@ fn render_file_browser(f: &mut Frame, app: &App, area: Rect) {
     
     // Render help text
     let help_text = if app.file_browser_save_mode {
-        vec![
-            Line::from("↑↓: Navigate | Enter: Save Here | 's': Save Here | 'q': Quick Save to Downloads | Esc: Cancel"),
-        ]
+        if app.file_browser_editing_filename {
+            vec![
+                Line::from("Type filename | Enter: Save | Esc: Cancel editing"),
+            ]
+        } else {
+            vec![
+                Line::from("↑↓: Navigate | Enter: Select/Edit | 'f': Edit filename | 's': Save | 'q': Quick Save | Esc: Cancel"),
+            ]
+        }
     } else {
         vec![
             Line::from("↑↓: Navigate | Enter: Select/Open | Backspace: Parent Dir | Esc: Cancel"),

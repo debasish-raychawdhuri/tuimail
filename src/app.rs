@@ -135,6 +135,7 @@ pub struct App {
     pub file_browser_save_mode: bool, // Whether we're saving (vs selecting for attach)
     pub file_browser_save_filename: String, // Filename to save as
     pub file_browser_save_data: Vec<u8>, // Data to save
+    pub file_browser_editing_filename: bool, // Whether we're editing the filename
 }
 
 impl App {
@@ -241,6 +242,7 @@ impl App {
             file_browser_save_mode: false,
             file_browser_save_filename: String::new(),
             file_browser_save_data: Vec::new(),
+            file_browser_editing_filename: false,
         }
     }
     
@@ -649,6 +651,14 @@ impl App {
     }
     
     pub fn handle_key_event(&mut self, key: KeyEvent) -> AppResult<()> {
+        debug_log(&format!("Input received: {:?}, file_browser_mode: {}", key, self.file_browser_mode));
+        
+        // Handle file browser mode FIRST, regardless of current app mode
+        if self.file_browser_mode {
+            debug_log("Routing to file browser input handler");
+            return self.handle_file_browser_input(key);
+        }
+        
         match self.mode {
             AppMode::Normal => self.handle_normal_mode(key),
             AppMode::Compose => self.handle_compose_mode(key),
@@ -757,12 +767,6 @@ impl App {
     }
     
     fn handle_compose_mode(&mut self, key: KeyEvent) -> AppResult<()> {
-        // Handle file browser mode separately
-        if self.file_browser_mode {
-            debug_log("Routing to file browser input handler");
-            return self.handle_file_browser_input(key);
-        }
-        
         // Handle attachment input mode separately
         if self.attachment_input_mode {
             return self.handle_attachment_input(key);
@@ -1549,54 +1553,106 @@ impl App {
 
     /// Handle key input when in file browser mode
     fn handle_file_browser_input(&mut self, key: KeyEvent) -> AppResult<()> {
-        debug_log(&format!("File browser input: {:?}", key));
-        match key.code {
+        debug_log(&format!("File browser input: {:?}, editing_filename: {}", key, self.file_browser_editing_filename));
+        
+        // If we're editing filename, handle text input
+        if self.file_browser_editing_filename {
+            match key.code {
+                KeyCode::Enter => {
+                    // Finish editing filename and save
+                    let save_path = self.file_browser_current_path.join(&self.file_browser_save_filename);
+                    debug_log(&format!("Saving attachment to: {}", save_path.display()));
+                    self.save_attachment_to_path(&save_path)?;
+                    self.file_browser_mode = false;
+                    self.file_browser_save_mode = false;
+                    self.file_browser_editing_filename = false;
+                    Ok(())
+                }
+                KeyCode::Esc => {
+                    // Cancel filename editing
+                    self.file_browser_editing_filename = false;
+                    Ok(())
+                }
+                KeyCode::Backspace => {
+                    // Remove last character
+                    self.file_browser_save_filename.pop();
+                    Ok(())
+                }
+                KeyCode::Char(c) => {
+                    // Add character to filename
+                    self.file_browser_save_filename.push(c);
+                    Ok(())
+                }
+                _ => Ok(()),
+            }
+        } else {
+            // Normal file browser navigation
+            match key.code {
             KeyCode::Esc => {
                 // Exit file browser
                 self.file_browser_mode = false;
+                self.file_browser_editing_filename = false;
                 self.show_info("File browser cancelled");
                 Ok(())
             }
             KeyCode::Up => {
+                debug_log(&format!("Up key pressed. Current selection: {}, Items count: {}", self.file_browser_selected, self.file_browser_items.len()));
                 if self.file_browser_selected > 0 {
                     self.file_browser_selected -= 1;
+                    debug_log(&format!("Selection moved up to: {}", self.file_browser_selected));
+                } else {
+                    debug_log("Already at top, cannot move up");
                 }
                 Ok(())
             }
             KeyCode::Down => {
+                debug_log(&format!("Down key pressed. Current selection: {}, Items count: {}", self.file_browser_selected, self.file_browser_items.len()));
                 if self.file_browser_selected < self.file_browser_items.len().saturating_sub(1) {
                     self.file_browser_selected += 1;
+                    debug_log(&format!("Selection moved down to: {}", self.file_browser_selected));
+                } else {
+                    debug_log("Already at bottom, cannot move down");
                 }
                 Ok(())
             }
             KeyCode::Enter => {
-                if self.file_browser_selected < self.file_browser_items.len() {
-                    let selected_item = &self.file_browser_items[self.file_browser_selected];
-                    
-                    if selected_item.is_directory {
-                        // Navigate into directory
-                        self.file_browser_current_path = selected_item.path.clone();
-                        self.load_file_browser_directory()?;
-                        self.file_browser_selected = 0;
+                if self.file_browser_save_mode {
+                    if self.file_browser_selected < self.file_browser_items.len() {
+                        let selected_item = &self.file_browser_items[self.file_browser_selected];
+                        
+                        if selected_item.is_directory {
+                            // Navigate into directory
+                            self.file_browser_current_path = selected_item.path.clone();
+                            self.load_file_browser_directory()?;
+                            self.file_browser_selected = 0;
+                        } else {
+                            // Selected a file - use its name as default but allow editing
+                            self.file_browser_save_filename = selected_item.name.clone();
+                            self.file_browser_editing_filename = true;
+                            self.show_info("Edit filename and press Enter to save, or Esc to cancel");
+                        }
                     } else {
-                        if self.file_browser_save_mode {
-                            // Save mode: use selected file's directory and name
-                            let save_path = selected_item.path.clone();
-                            self.save_attachment_to_path(&save_path)?;
+                        // No selection - start editing filename
+                        self.file_browser_editing_filename = true;
+                        self.show_info("Enter filename and press Enter to save, or Esc to cancel");
+                    }
+                } else {
+                    // Loading mode - select file or navigate into directory
+                    if self.file_browser_selected < self.file_browser_items.len() {
+                        let selected_item = &self.file_browser_items[self.file_browser_selected];
+                        
+                        if selected_item.is_directory {
+                            // Navigate into directory
+                            self.file_browser_current_path = selected_item.path.clone();
+                            self.load_file_browser_directory()?;
+                            self.file_browser_selected = 0;
                         } else {
                             // Select file for attachment
                             let file_path = selected_item.path.to_string_lossy().to_string();
                             self.add_attachment_from_path(&file_path)?;
+                            self.file_browser_mode = false;
                         }
-                        self.file_browser_mode = false;
-                        self.file_browser_save_mode = false;
                     }
-                } else if self.file_browser_save_mode {
-                    // If no file selected but in save mode, save with default filename
-                    let save_path = self.file_browser_current_path.join(&self.file_browser_save_filename);
-                    self.save_attachment_to_path(&save_path)?;
-                    self.file_browser_mode = false;
-                    self.file_browser_save_mode = false;
                 }
                 Ok(())
             }
@@ -1616,6 +1672,13 @@ impl App {
                 self.save_attachment_to_path(&save_path)?;
                 self.file_browser_mode = false;
                 self.file_browser_save_mode = false;
+                self.file_browser_editing_filename = false;
+                Ok(())
+            }
+            KeyCode::Char('f') if self.file_browser_save_mode => {
+                // Start editing filename
+                self.file_browser_editing_filename = true;
+                self.show_info("Enter filename and press Enter to save, or Esc to cancel");
                 Ok(())
             }
             KeyCode::Char('s') if self.file_browser_save_mode => {
@@ -1625,6 +1688,7 @@ impl App {
                 self.save_attachment_to_path(&save_path)?;
                 self.file_browser_mode = false;
                 self.file_browser_save_mode = false;
+                self.file_browser_editing_filename = false;
                 Ok(())
             }
             KeyCode::Backspace => {
@@ -1638,6 +1702,7 @@ impl App {
             }
             _ => Ok(()),
         }
+        } // Close the else block for filename editing
     }
 
     /// Load the current directory contents for file browser
