@@ -1177,14 +1177,14 @@ impl EmailClient {
     pub fn send_email(&self, email: &Email) -> Result<(), EmailError> {
         // Debug: Log attachment info
         if !email.attachments.is_empty() {
-            eprintln!("DEBUG: Sending email with {} attachments:", email.attachments.len());
+            debug_log(&format!("DEBUG: Sending email with {} attachments:", email.attachments.len()));
             for (i, attachment) in email.attachments.iter().enumerate() {
-                eprintln!("  {}: {} ({} bytes, {})", 
+                debug_log(&format!("  {}: {} ({} bytes, {})", 
                     i + 1, 
                     attachment.filename, 
                     attachment.data.len(), 
                     attachment.content_type
-                );
+                ));
             }
         }
         

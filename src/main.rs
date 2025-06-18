@@ -374,7 +374,7 @@ fn main() -> Result<()> {
     // If there was an error, print it
     if let Err(err) = result {
         error!("Error: {:?}", err);
-        println!("Error: {:?}", err);
+        eprintln!("Error: {:?}", err); // Use eprintln for errors to stderr
     }
     
     Ok(())
