@@ -263,7 +263,12 @@ impl App {
         if account_idx < self.config.accounts.len() {
             self.current_account_idx = account_idx;
             self.rebuild_folder_items();
-            self.init_account(account_idx)?;
+            
+            // Only initialize if the account isn't already initialized
+            if !self.accounts.contains_key(&account_idx) {
+                self.init_account(account_idx)?;
+            }
+            
             Ok(())
         } else {
             Err(AppError::EmailError(crate::email::EmailError::ImapError(
@@ -2025,16 +2030,32 @@ impl App {
         // Switch to the next account
         self.current_account_idx = next_account_idx;
         
-        // Initialize the account if needed
+        // Initialize the account if needed (only if not already initialized)
         self.ensure_account_initialized(next_account_idx)?;
         
-        // Load INBOX for the new account
-        if let Err(e) = self.load_emails_for_account_folder(next_account_idx, "INBOX") {
-            self.show_error(&format!("Failed to load INBOX for account: {}", e));
+        // Check if we already have emails cached for this account
+        let need_to_load_emails = if let Some(account_data) = self.accounts.get(&next_account_idx) {
+            // If account has no emails or we're switching accounts, we might want to refresh
+            // For now, let's be conservative and only skip loading if we have recent emails
+            account_data.emails.is_empty()
         } else {
-            let account_name = &self.config.accounts[next_account_idx].name;
-            self.show_info(&format!("Switched to account: {}", account_name));
+            true // Account not initialized, need to load
+        };
+        
+        if need_to_load_emails {
+            // Load INBOX for the new account only if not cached
+            if let Err(e) = self.load_emails_for_account_folder(next_account_idx, "INBOX") {
+                self.show_error(&format!("Failed to load INBOX for account: {}", e));
+            }
+        } else {
+            // Use cached emails from the account
+            if let Some(account_data) = self.accounts.get(&next_account_idx) {
+                self.emails = account_data.emails.clone();
+            }
         }
+        
+        let account_name = &self.config.accounts[next_account_idx].name;
+        self.show_info(&format!("Switched to account: {}", account_name));
         
         // Reset selection
         self.selected_email_idx = if self.emails.is_empty() { None } else { Some(0) };
