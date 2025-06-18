@@ -327,6 +327,7 @@ fn render_email_header(f: &mut Frame, email: &Email, area: Rect) {
     f.render_widget(header, area);
 }
 
+#[allow(dead_code)]
 fn render_email_body(f: &mut Frame, email: &Email, area: Rect) {
     let content = email.body_text.as_deref().unwrap_or("No content");
     

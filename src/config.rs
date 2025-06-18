@@ -159,18 +159,6 @@ impl Config {
         Ok(())
     }
     
-    pub fn get_current_account(&self) -> Result<&EmailAccount, &'static str> {
-        if self.accounts.is_empty() {
-            return Err("No accounts configured");
-        }
-        
-        if self.default_account >= self.accounts.len() {
-            return Err("Default account index out of bounds");
-        }
-        
-        Ok(&self.accounts[self.default_account])
-    }
-    
     pub fn get_current_account_safe(&self) -> EmailAccount {
         if self.accounts.is_empty() {
             // Return a default account if none exist (this shouldn't happen in normal usage)
@@ -181,37 +169,5 @@ impl Config {
         } else {
             self.accounts[self.default_account].clone()
         }
-    }
-    
-    pub fn add_account(&mut self, account: EmailAccount) {
-        self.accounts.push(account);
-    }
-    
-    pub fn remove_account(&mut self, index: usize) -> Result<(), &'static str> {
-        if index >= self.accounts.len() {
-            return Err("Account index out of bounds");
-        }
-        
-        if self.accounts.len() == 1 {
-            return Err("Cannot remove the only account");
-        }
-        
-        self.accounts.remove(index);
-        
-        // Adjust default account index if needed
-        if self.default_account >= self.accounts.len() {
-            self.default_account = self.accounts.len() - 1;
-        }
-        
-        Ok(())
-    }
-    
-    pub fn set_default_account(&mut self, index: usize) -> Result<(), &'static str> {
-        if index >= self.accounts.len() {
-            return Err("Account index out of bounds");
-        }
-        
-        self.default_account = index;
-        Ok(())
     }
 }

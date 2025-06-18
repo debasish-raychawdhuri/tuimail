@@ -272,6 +272,7 @@ impl EmailDatabase {
         }
     }
 
+    #[allow(dead_code)]
     pub fn get_email_count(&self, account_email: &str, folder: &str) -> Result<usize> {
         let count: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM emails WHERE account_email = ?1 AND folder = ?2",
@@ -281,6 +282,7 @@ impl EmailDatabase {
         Ok(count as usize)
     }
 
+    #[allow(dead_code)]
     pub fn delete_emails_by_folder(&self, account_email: &str, folder: &str) -> Result<()> {
         self.conn.execute(
             "DELETE FROM emails WHERE account_email = ?1 AND folder = ?2",
@@ -289,11 +291,13 @@ impl EmailDatabase {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn vacuum(&self) -> Result<()> {
         self.conn.execute("VACUUM", [])?;
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn get_database_size(&self) -> Result<u64> {
         let size: i64 = self.conn.query_row(
             "SELECT page_count * page_size FROM pragma_page_count(), pragma_page_size()",

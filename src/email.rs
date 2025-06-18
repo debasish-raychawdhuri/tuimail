@@ -135,9 +135,6 @@ pub enum EmailError {
     #[error("TLS error: {0}")]
     TlsError(#[from] native_tls::Error),
     
-    #[error("Parsing error: {0}")]
-    ParsingError(String),
-    
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
     
@@ -725,7 +722,6 @@ impl Email {
 #[derive(Clone)]
 pub struct EmailClient {
     account: EmailAccount,
-    cache_dir: String,
     credentials: SecureCredentials,
     db_path: std::path::PathBuf,
 }
@@ -747,7 +743,7 @@ impl EmailClient {
         // Set up database path
         let db_path = std::path::PathBuf::from(&cache_dir).join("emails.db");
         
-        Self { account, cache_dir, credentials, db_path }
+        Self { account, credentials, db_path }
     }
     
     fn get_database(&self) -> Result<EmailDatabase, EmailError> {
@@ -834,6 +830,7 @@ impl EmailClient {
         }
     }
     
+    #[allow(dead_code)]
     pub fn force_full_sync(&self, folder: &str) -> Result<Vec<Email>, EmailError> {
         debug_log(&format!("force_full_sync called for folder: {}", folder));
         
@@ -1452,6 +1449,7 @@ impl EmailClient {
         Err(EmailError::ImapError("Failed to mark email as read after retries".to_string()))
     }
     
+    #[allow(dead_code)]
     pub fn mark_as_unread(&self, email: &Email) -> Result<(), EmailError> {
         match self.account.imap_security {
             ImapSecurity::SSL | ImapSecurity::StartTLS => {
@@ -2105,6 +2103,7 @@ impl EmailClient {
     
 
 
+    #[allow(dead_code)]
     pub fn move_email(&self, email: &Email, target_folder: &str) -> Result<(), EmailError> {
         match self.account.imap_security {
             ImapSecurity::SSL | ImapSecurity::StartTLS => {
@@ -2136,6 +2135,7 @@ impl EmailClient {
 }
 
 // Background email fetcher with IMAP IDLE support
+#[allow(dead_code)]
 pub struct EmailFetcher {
     client: EmailClient,
     tx: mpsc::Sender<Vec<Email>>,
@@ -2146,6 +2146,7 @@ pub struct EmailFetcher {
 }
 
 impl EmailFetcher {
+    #[allow(dead_code)]
     pub fn new(
         client: EmailClient, 
         tx: mpsc::Sender<Vec<Email>>,
@@ -2165,6 +2166,7 @@ impl EmailFetcher {
         }
     }
     
+    #[allow(dead_code)]
     pub fn start(&mut self) {
         // Set running flag
         {
@@ -2225,6 +2227,7 @@ impl EmailFetcher {
         }
     }
     
+    #[allow(dead_code)]
     pub fn set_folder(&self, folder: String) {
         // For now, we'll keep it simple and just use INBOX
         // In a more advanced implementation, we could use channels to communicate

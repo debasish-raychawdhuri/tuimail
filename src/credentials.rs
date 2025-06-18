@@ -43,6 +43,7 @@ impl CredentialManager {
     }
 
     /// Delete a password from the system keyring
+    #[allow(dead_code)]
     pub fn delete_password(&self, account_id: &str, password_type: &str) -> Result<()> {
         let service = format!("{}-{}", self.app_name, password_type);
         let entry = Entry::new(&service, account_id)
@@ -132,6 +133,7 @@ impl FallbackCredentialManager {
         Ok(Some(password))
     }
 
+    #[allow(dead_code)]
     pub fn delete_password(&self, account_id: &str, password_type: &str) -> Result<()> {
         let file_path = format!("{}/{}_{}.enc", self.config_dir, account_id, password_type);
         
@@ -193,6 +195,7 @@ impl SecureCredentials {
         }
     }
 
+    #[allow(dead_code)]
     pub fn delete_password(&self, account_id: &str, password_type: &str) -> Result<()> {
         match self {
             Self::SystemKeyring(manager) => manager.delete_password(account_id, password_type),
