@@ -547,17 +547,36 @@ impl Email {
                                 is_attachment = true;
                                 debug_log("Part is marked as attachment or inline");
                                 
-                                if let Some(start) = header_value.find("filename=") {
-                                    let filename_part = &header_value[start + 9..];
-                                    let filename_part = filename_part.trim_start_matches('"');
-                                    if let Some(end) = filename_part.find('"') {
-                                        filename = Some(filename_part[..end].to_string());
-                                    } else if let Some(end) = filename_part.find(';') {
-                                        filename = Some(filename_part[..end].trim().to_string());
-                                    } else {
-                                        filename = Some(filename_part.trim().to_string());
+                                // Try multiple filename patterns
+                                let filename_patterns = [
+                                    "filename=",
+                                    "filename*=",
+                                    "name=",
+                                ];
+                                
+                                for pattern in &filename_patterns {
+                                    if filename.is_none() {
+                                        if let Some(start) = header_value.find(pattern) {
+                                            let filename_part = &header_value[start + pattern.len()..];
+                                            let filename_part = filename_part.trim_start_matches('"').trim_start_matches('\'');
+                                            
+                                            let extracted_name = if let Some(end) = filename_part.find('"') {
+                                                filename_part[..end].to_string()
+                                            } else if let Some(end) = filename_part.find('\'') {
+                                                filename_part[..end].to_string()
+                                            } else if let Some(end) = filename_part.find(';') {
+                                                filename_part[..end].trim().to_string()
+                                            } else {
+                                                filename_part.trim().to_string()
+                                            };
+                                            
+                                            if !extracted_name.is_empty() {
+                                                filename = Some(extracted_name);
+                                                debug_log(&format!("Extracted filename using pattern '{}': {:?}", pattern, filename));
+                                                break;
+                                            }
+                                        }
                                     }
-                                    debug_log(&format!("Extracted filename: {:?}", filename));
                                 }
                             }
                         } else if header_name_str.contains("contenttype") || header_name_str.contains("content-type") {
@@ -571,17 +590,29 @@ impl Email {
                             
                             // Also check for name parameter in content-type
                             if filename.is_none() {
-                                if let Some(start) = header_value.find("name=") {
-                                    let name_part = &header_value[start + 5..];
-                                    let name_part = name_part.trim_start_matches('"');
-                                    if let Some(end) = name_part.find('"') {
-                                        filename = Some(name_part[..end].to_string());
-                                    } else if let Some(end) = name_part.find(';') {
-                                        filename = Some(name_part[..end].trim().to_string());
-                                    } else {
-                                        filename = Some(name_part.trim().to_string());
+                                let name_patterns = ["name=", "filename="];
+                                
+                                for pattern in &name_patterns {
+                                    if let Some(start) = header_value.find(pattern) {
+                                        let name_part = &header_value[start + pattern.len()..];
+                                        let name_part = name_part.trim_start_matches('"').trim_start_matches('\'');
+                                        
+                                        let extracted_name = if let Some(end) = name_part.find('"') {
+                                            name_part[..end].to_string()
+                                        } else if let Some(end) = name_part.find('\'') {
+                                            name_part[..end].to_string()
+                                        } else if let Some(end) = name_part.find(';') {
+                                            name_part[..end].trim().to_string()
+                                        } else {
+                                            name_part.trim().to_string()
+                                        };
+                                        
+                                        if !extracted_name.is_empty() {
+                                            filename = Some(extracted_name);
+                                            debug_log(&format!("Extracted filename from content-type using pattern '{}': {:?}", pattern, filename));
+                                            break;
+                                        }
                                     }
-                                    debug_log(&format!("Extracted filename from content-type: {:?}", filename));
                                 }
                             }
                         }
@@ -599,18 +630,32 @@ impl Email {
              content_type != "application/octet-stream");
         
         if is_likely_attachment {
+            debug_log(&format!("Final attachment analysis: content_type={}, filename={:?}, is_attachment={}", 
+                content_type, filename, is_attachment));
+            
             let final_filename = filename.unwrap_or_else(|| {
-                // Generate filename based on content type
-                match content_type.as_str() {
-                    "application/pdf" => "document.pdf".to_string(),
-                    "image/jpeg" => "image.jpg".to_string(),
-                    "image/png" => "image.png".to_string(),
-                    "image/gif" => "image.gif".to_string(),
-                    "application/zip" => "archive.zip".to_string(),
-                    "application/msword" => "document.doc".to_string(),
-                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => "document.docx".to_string(),
-                    _ => format!("attachment.{}", content_type.split('/').last().unwrap_or("bin")),
-                }
+                debug_log("No filename found in headers, generating fallback filename");
+                // Generate filename based on content type with timestamp for uniqueness
+                let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
+                let fallback_name = match content_type.as_str() {
+                    "application/pdf" => format!("document_{}.pdf", timestamp),
+                    "image/jpeg" => format!("image_{}.jpg", timestamp),
+                    "image/png" => format!("image_{}.png", timestamp),
+                    "image/gif" => format!("image_{}.gif", timestamp),
+                    "application/zip" => format!("archive_{}.zip", timestamp),
+                    "application/msword" => format!("document_{}.doc", timestamp),
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => format!("document_{}.docx", timestamp),
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => format!("spreadsheet_{}.xlsx", timestamp),
+                    "application/vnd.ms-excel" => format!("spreadsheet_{}.xls", timestamp),
+                    "text/plain" => format!("text_{}.txt", timestamp),
+                    "text/csv" => format!("data_{}.csv", timestamp),
+                    _ => {
+                        let extension = content_type.split('/').last().unwrap_or("bin");
+                        format!("attachment_{}.{}", timestamp, extension)
+                    }
+                };
+                debug_log(&format!("Generated fallback filename: {}", fallback_name));
+                fallback_name
             });
             
             debug_log(&format!("Treating as attachment: content_type={}, filename={}, is_attachment={}", 
