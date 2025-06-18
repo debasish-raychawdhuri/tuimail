@@ -1518,6 +1518,132 @@ impl EmailClient {
         }
     }
     
+    /// Fetch only new emails since the last known count
+    fn fetch_new_emails_since_count(&self, folder: &str, last_count: usize) -> Result<Vec<Email>, EmailError> {
+        debug_log(&format!("Fetching new emails since count: {}", last_count));
+        
+        match self.account.imap_security {
+            ImapSecurity::SSL | ImapSecurity::StartTLS => {
+                self.fetch_new_emails_since_count_secure(folder, last_count)
+            }
+            ImapSecurity::None => {
+                self.fetch_new_emails_since_count_plain(folder, last_count)
+            }
+        }
+    }
+    
+    fn fetch_new_emails_since_count_secure(&self, folder: &str, last_count: usize) -> Result<Vec<Email>, EmailError> {
+        let mut session = self.connect_imap_secure()?;
+        session.select(folder)
+            .map_err(|e| EmailError::ImapError(e.to_string()))?;
+        
+        // Get current message count
+        let current_count = session.search("ALL")
+            .map_err(|e| EmailError::ImapError(e.to_string()))?
+            .len();
+        
+        if current_count <= last_count {
+            debug_log("No new emails to fetch");
+            return Ok(Vec::new());
+        }
+        
+        let new_message_count = current_count - last_count;
+        debug_log(&format!("Fetching {} new emails (messages {}-{})", 
+            new_message_count, last_count + 1, current_count));
+        
+        // Fetch only the new messages
+        let sequence = format!("{}:{}", last_count + 1, current_count);
+        let messages = session
+            .fetch(sequence, "(RFC822 FLAGS UID)")
+            .map_err(|e| EmailError::ImapError(e.to_string()))?;
+        
+        let mut emails = Vec::new();
+        for (i, message) in messages.iter().enumerate() {
+            if let Some(body) = message.body() {
+                let flags: Vec<String> = message.flags().iter().map(|f| format!("{:?}", f)).collect();
+                let uid = message.uid.unwrap_or(0).to_string();
+                
+                debug_log(&format!("Processing new email {}: UID={}, size={} bytes, flags={:?}", 
+                    i + 1, uid, body.len(), flags));
+                
+                match mail_parser::Message::parse(body) {
+                    Some(parsed) => {
+                        match Email::from_parsed_email(&parsed, &uid, folder, flags) {
+                            Ok(email) => {
+                                emails.push(email);
+                            }
+                            Err(e) => {
+                                debug_log(&format!("Failed to create email object: {}", e));
+                            }
+                        }
+                    }
+                    None => {
+                        debug_log("Failed to parse email");
+                    }
+                }
+            }
+        }
+        
+        debug_log(&format!("Successfully fetched {} new emails", emails.len()));
+        Ok(emails)
+    }
+    
+    fn fetch_new_emails_since_count_plain(&self, folder: &str, last_count: usize) -> Result<Vec<Email>, EmailError> {
+        let mut session = self.connect_imap_plain()?;
+        session.select(folder)
+            .map_err(|e| EmailError::ImapError(e.to_string()))?;
+        
+        // Get current message count
+        let current_count = session.search("ALL")
+            .map_err(|e| EmailError::ImapError(e.to_string()))?
+            .len();
+        
+        if current_count <= last_count {
+            debug_log("No new emails to fetch");
+            return Ok(Vec::new());
+        }
+        
+        let new_message_count = current_count - last_count;
+        debug_log(&format!("Fetching {} new emails (messages {}-{})", 
+            new_message_count, last_count + 1, current_count));
+        
+        // Fetch only the new messages
+        let sequence = format!("{}:{}", last_count + 1, current_count);
+        let messages = session
+            .fetch(sequence, "(RFC822 FLAGS UID)")
+            .map_err(|e| EmailError::ImapError(e.to_string()))?;
+        
+        let mut emails = Vec::new();
+        for (i, message) in messages.iter().enumerate() {
+            if let Some(body) = message.body() {
+                let flags: Vec<String> = message.flags().iter().map(|f| format!("{:?}", f)).collect();
+                let uid = message.uid.unwrap_or(0).to_string();
+                
+                debug_log(&format!("Processing new email {}: UID={}, size={} bytes, flags={:?}", 
+                    i + 1, uid, body.len(), flags));
+                
+                match mail_parser::Message::parse(body) {
+                    Some(parsed) => {
+                        match Email::from_parsed_email(&parsed, &uid, folder, flags) {
+                            Ok(email) => {
+                                emails.push(email);
+                            }
+                            Err(e) => {
+                                debug_log(&format!("Failed to create email object: {}", e));
+                            }
+                        }
+                    }
+                    None => {
+                        debug_log("Failed to parse email");
+                    }
+                }
+            }
+        }
+        
+        debug_log(&format!("Successfully fetched {} new emails", emails.len()));
+        Ok(emails)
+    }
+    
     pub fn supports_idle(&self) -> bool {
         // Try to connect and check capabilities
         match self.account.imap_security {
@@ -1537,7 +1663,7 @@ impl EmailClient {
             }
         }
     }
-
+    
     pub fn run_idle_session(
         &self,
         folder: &str,
@@ -1562,6 +1688,47 @@ impl EmailClient {
         tx: &mpsc::Sender<Vec<Email>>,
         running: &Arc<Mutex<bool>>,
     ) -> Result<(), EmailError> {
+        let mut reconnect_attempts = 0;
+        const MAX_RECONNECT_ATTEMPTS: u32 = 5;
+        
+        loop {
+            // Check if we should stop
+            {
+                let running_guard = running.lock().unwrap();
+                if !*running_guard {
+                    debug_log("IDLE session: stopping due to running flag");
+                    return Ok(());
+                }
+            }
+            
+            match self.run_single_idle_session_secure(folder, tx, running) {
+                Ok(_) => {
+                    debug_log("IDLE session completed normally");
+                    return Ok(());
+                }
+                Err(e) => {
+                    reconnect_attempts += 1;
+                    debug_log(&format!("IDLE session error (attempt {}): {}", reconnect_attempts, e));
+                    
+                    if reconnect_attempts >= MAX_RECONNECT_ATTEMPTS {
+                        debug_log("Max reconnection attempts reached, stopping IDLE session");
+                        return Err(e);
+                    }
+                    
+                    // Wait before reconnecting
+                    std::thread::sleep(std::time::Duration::from_secs(5));
+                    debug_log("Attempting to reconnect IDLE session...");
+                }
+            }
+        }
+    }
+    
+    fn run_single_idle_session_secure(
+        &self,
+        folder: &str,
+        tx: &mpsc::Sender<Vec<Email>>,
+        running: &Arc<Mutex<bool>>,
+    ) -> Result<(), EmailError> {
         let mut session = self.connect_imap_secure()?;
         session.select(folder)
             .map_err(|e| EmailError::ImapError(e.to_string()))?;
@@ -1579,63 +1746,129 @@ impl EmailClient {
         
         debug_log("IDLE session: Server supports IDLE, starting IDLE loop");
         
-        // Simple IDLE loop - just use it as a more efficient polling mechanism
+        // Get initial state
+        let mut last_message_count = session.search("ALL")
+            .map_err(|e| EmailError::ImapError(e.to_string()))?
+            .len();
+        debug_log(&format!("IDLE session: initial message count: {}", last_message_count));
+        
+        // Main IDLE loop
         loop {
             // Check if we should stop
             {
                 let running_guard = running.lock().unwrap();
                 if !*running_guard {
                     debug_log("IDLE session: stopping due to running flag");
-                    break;
+                    return Ok(());
                 }
             }
             
-            // Start IDLE and wait for a short time
-            match session.idle() {
-                Ok(mut idle_handle) => {
-                    debug_log("IDLE session: IDLE started, waiting for notifications");
+            // Start IDLE command
+            debug_log("IDLE session: starting IDLE command");
+            let idle_result = {
+                match session.idle() {
+                    Ok(idle_handle) => {
+                        debug_log("IDLE session: IDLE started, waiting for server notifications");
+                        
+                        // Wait for notifications (29 minutes to stay within RFC limits)
+                        let timeout = std::time::Duration::from_secs(29 * 60);
+                        idle_handle.wait_with_timeout(timeout)
+                    }
+                    Err(e) => {
+                        debug_log(&format!("IDLE session: failed to start IDLE: {}", e));
+                        return Err(EmailError::ImapError(e.to_string()));
+                    }
+                }
+            };
+            
+            // Process IDLE result
+            match idle_result {
+                Ok(_) => {
+                    debug_log("IDLE session: received server notification");
                     
-                    // Wait for 30 seconds or until notification
-                    let timeout = std::time::Duration::from_secs(30);
-                    match idle_handle.wait_with_timeout(timeout) {
-                        Ok(_) => {
-                            debug_log("IDLE session: received notification, fetching emails");
-                            
-                            // Fetch new emails
-                            match self.fetch_emails(folder, 50) {
-                                Ok(emails) => {
-                                    debug_log(&format!("IDLE session: fetched {} emails", emails.len()));
-                                    if let Err(e) = tx.send(emails) {
+                    // Check current message count
+                    let current_count = session.search("ALL")
+                        .map_err(|e| EmailError::ImapError(e.to_string()))?
+                        .len();
+                    
+                    debug_log(&format!("IDLE session: message count changed from {} to {}", 
+                        last_message_count, current_count));
+                    
+                    if current_count != last_message_count {
+                        // Fetch new emails incrementally
+                        match self.fetch_new_emails_since_count(folder, last_message_count) {
+                            Ok(new_emails) => {
+                                if !new_emails.is_empty() {
+                                    debug_log(&format!("IDLE session: fetched {} new emails", new_emails.len()));
+                                    if let Err(e) = tx.send(new_emails) {
                                         debug_log(&format!("IDLE session: email channel closed: {}", e));
                                         return Ok(());
                                     } else {
-                                        debug_log("IDLE session: emails sent to UI");
+                                        debug_log("IDLE session: new emails sent to UI");
                                     }
                                 }
-                                Err(e) => {
-                                    debug_log(&format!("IDLE session: failed to fetch emails: {}", e));
-                                }
+                            }
+                            Err(e) => {
+                                debug_log(&format!("IDLE session: failed to fetch new emails: {}", e));
+                                // Continue IDLE loop even if fetch fails
                             }
                         }
-                        Err(e) => {
-                            debug_log(&format!("IDLE session: timeout or error: {}", e));
-                            // This is normal for timeout
-                        }
+                        last_message_count = current_count;
                     }
                 }
                 Err(e) => {
-                    debug_log(&format!("IDLE session: failed to start IDLE: {}", e));
-                    // Fall back to regular polling for this iteration
-                    std::thread::sleep(std::time::Duration::from_secs(30));
+                    debug_log(&format!("IDLE session: timeout or error: {}", e));
+                    // Timeout is normal, continue the loop
                 }
             }
+            
+            // Small delay before next IDLE cycle
+            std::thread::sleep(std::time::Duration::from_millis(100));
         }
-        
-        debug_log("IDLE session: stopped");
-        Ok(())
     }
     
     fn run_idle_session_plain(
+        &self,
+        folder: &str,
+        tx: &mpsc::Sender<Vec<Email>>,
+        running: &Arc<Mutex<bool>>,
+    ) -> Result<(), EmailError> {
+        let mut reconnect_attempts = 0;
+        const MAX_RECONNECT_ATTEMPTS: u32 = 5;
+        
+        loop {
+            // Check if we should stop
+            {
+                let running_guard = running.lock().unwrap();
+                if !*running_guard {
+                    debug_log("IDLE session (plain): stopping due to running flag");
+                    return Ok(());
+                }
+            }
+            
+            match self.run_single_idle_session_plain(folder, tx, running) {
+                Ok(_) => {
+                    debug_log("IDLE session (plain) completed normally");
+                    return Ok(());
+                }
+                Err(e) => {
+                    reconnect_attempts += 1;
+                    debug_log(&format!("IDLE session (plain) error (attempt {}): {}", reconnect_attempts, e));
+                    
+                    if reconnect_attempts >= MAX_RECONNECT_ATTEMPTS {
+                        debug_log("Max reconnection attempts reached, stopping IDLE session (plain)");
+                        return Err(e);
+                    }
+                    
+                    // Wait before reconnecting
+                    std::thread::sleep(std::time::Duration::from_secs(5));
+                    debug_log("Attempting to reconnect IDLE session (plain)...");
+                }
+            }
+        }
+    }
+    
+    fn run_single_idle_session_plain(
         &self,
         folder: &str,
         tx: &mpsc::Sender<Vec<Email>>,
@@ -1658,60 +1891,85 @@ impl EmailClient {
         
         debug_log("IDLE session (plain): Server supports IDLE, starting IDLE loop");
         
-        // Simple IDLE loop - just use it as a more efficient polling mechanism
+        // Get initial state
+        let mut last_message_count = session.search("ALL")
+            .map_err(|e| EmailError::ImapError(e.to_string()))?
+            .len();
+        debug_log(&format!("IDLE session (plain): initial message count: {}", last_message_count));
+        
+        // Main IDLE loop
         loop {
             // Check if we should stop
             {
                 let running_guard = running.lock().unwrap();
                 if !*running_guard {
                     debug_log("IDLE session (plain): stopping due to running flag");
-                    break;
+                    return Ok(());
                 }
             }
             
-            // Start IDLE and wait for a short time
-            match session.idle() {
-                Ok(mut idle_handle) => {
-                    debug_log("IDLE session (plain): IDLE started, waiting for notifications");
+            // Start IDLE command
+            debug_log("IDLE session (plain): starting IDLE command");
+            let idle_result = {
+                match session.idle() {
+                    Ok(idle_handle) => {
+                        debug_log("IDLE session (plain): IDLE started, waiting for server notifications");
+                        
+                        // Wait for notifications (29 minutes to stay within RFC limits)
+                        let timeout = std::time::Duration::from_secs(29 * 60);
+                        idle_handle.wait_with_timeout(timeout)
+                    }
+                    Err(e) => {
+                        debug_log(&format!("IDLE session (plain): failed to start IDLE: {}", e));
+                        return Err(EmailError::ImapError(e.to_string()));
+                    }
+                }
+            };
+            
+            // Process IDLE result
+            match idle_result {
+                Ok(_) => {
+                    debug_log("IDLE session (plain): received server notification");
                     
-                    // Wait for 30 seconds or until notification
-                    let timeout = std::time::Duration::from_secs(30);
-                    match idle_handle.wait_with_timeout(timeout) {
-                        Ok(_) => {
-                            debug_log("IDLE session (plain): received notification, fetching emails");
-                            
-                            // Fetch new emails
-                            match self.fetch_emails(folder, 50) {
-                                Ok(emails) => {
-                                    debug_log(&format!("IDLE session (plain): fetched {} emails", emails.len()));
-                                    if let Err(e) = tx.send(emails) {
+                    // Check current message count
+                    let current_count = session.search("ALL")
+                        .map_err(|e| EmailError::ImapError(e.to_string()))?
+                        .len();
+                    
+                    debug_log(&format!("IDLE session (plain): message count changed from {} to {}", 
+                        last_message_count, current_count));
+                    
+                    if current_count != last_message_count {
+                        // Fetch new emails incrementally
+                        match self.fetch_new_emails_since_count(folder, last_message_count) {
+                            Ok(new_emails) => {
+                                if !new_emails.is_empty() {
+                                    debug_log(&format!("IDLE session (plain): fetched {} new emails", new_emails.len()));
+                                    if let Err(e) = tx.send(new_emails) {
                                         debug_log(&format!("IDLE session (plain): email channel closed: {}", e));
                                         return Ok(());
                                     } else {
-                                        debug_log("IDLE session (plain): emails sent to UI");
+                                        debug_log("IDLE session (plain): new emails sent to UI");
                                     }
                                 }
-                                Err(e) => {
-                                    debug_log(&format!("IDLE session (plain): failed to fetch emails: {}", e));
-                                }
+                            }
+                            Err(e) => {
+                                debug_log(&format!("IDLE session (plain): failed to fetch new emails: {}", e));
+                                // Continue IDLE loop even if fetch fails
                             }
                         }
-                        Err(e) => {
-                            debug_log(&format!("IDLE session (plain): timeout or error: {}", e));
-                            // This is normal for timeout
-                        }
+                        last_message_count = current_count;
                     }
                 }
                 Err(e) => {
-                    debug_log(&format!("IDLE session (plain): failed to start IDLE: {}", e));
-                    // Fall back to regular polling for this iteration
-                    std::thread::sleep(std::time::Duration::from_secs(30));
+                    debug_log(&format!("IDLE session (plain): timeout or error: {}", e));
+                    // Timeout is normal, continue the loop
                 }
             }
+            
+            // Small delay before next IDLE cycle
+            std::thread::sleep(std::time::Duration::from_millis(100));
         }
-        
-        debug_log("IDLE session (plain): stopped");
-        Ok(())
     }
 
     pub fn move_email(&self, email: &Email, target_folder: &str) -> Result<(), EmailError> {

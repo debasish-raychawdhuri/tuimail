@@ -2143,20 +2143,45 @@ impl App {
                 Ok(new_emails) => {
                     debug_log(&format!("Received {} new emails from background fetcher", new_emails.len()));
                     
-                    // Update the current email list
-                    self.emails = new_emails;
-                    
-                    // Update the account's cached emails
-                    if let Some(account_data) = self.accounts.get_mut(&self.current_account_idx) {
-                        account_data.emails = self.emails.clone();
+                    if !new_emails.is_empty() {
+                        let new_count = new_emails.len();
+                        
+                        // Merge new emails with existing ones (add to the beginning for newest first)
+                        let mut merged_emails = new_emails;
+                        merged_emails.extend(self.emails.clone());
+                        
+                        // Remove duplicates based on email ID (UID)
+                        let mut seen_ids = std::collections::HashSet::new();
+                        merged_emails.retain(|email| {
+                            if seen_ids.contains(&email.id) {
+                                false
+                            } else {
+                                seen_ids.insert(email.id.clone());
+                                true
+                            }
+                        });
+                        
+                        debug_log(&format!("Merged emails: {} new + {} existing = {} total (after dedup)", 
+                            new_count, self.emails.len(), merged_emails.len()));
+                        
+                        self.emails = merged_emails;
+                        
+                        // Update the account's cached emails
+                        if let Some(account_data) = self.accounts.get_mut(&self.current_account_idx) {
+                            account_data.emails = self.emails.clone();
+                        }
+                        
+                        // Keep current selection if valid, otherwise select first email
+                        if let Some(selected_idx) = self.selected_email_idx {
+                            if selected_idx >= self.emails.len() {
+                                self.selected_email_idx = if self.emails.is_empty() { None } else { Some(0) };
+                            }
+                        } else if !self.emails.is_empty() {
+                            self.selected_email_idx = Some(0);
+                        }
+                        
+                        self.show_info(&format!("Received {} new emails", new_count));
                     }
-                    
-                    // Reset selection if needed
-                    if self.selected_email_idx.is_none() && !self.emails.is_empty() {
-                        self.selected_email_idx = Some(0);
-                    }
-                    
-                    self.show_info("New emails received");
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => {
                     // No new emails, this is normal
