@@ -2146,13 +2146,13 @@ impl App {
                     if !new_emails.is_empty() {
                         let new_count = new_emails.len();
                         
-                        // Merge new emails with existing ones (add to the beginning for newest first)
-                        let mut merged_emails = new_emails;
-                        merged_emails.extend(self.emails.clone());
+                        // Merge new emails with existing ones using proper deduplication and sorting
+                        let mut all_emails = self.emails.clone();
+                        all_emails.extend(new_emails);
                         
                         // Remove duplicates based on email ID (UID)
                         let mut seen_ids = std::collections::HashSet::new();
-                        merged_emails.retain(|email| {
+                        all_emails.retain(|email| {
                             if seen_ids.contains(&email.id) {
                                 false
                             } else {
@@ -2161,10 +2161,13 @@ impl App {
                             }
                         });
                         
-                        debug_log(&format!("Merged emails: {} new + {} existing = {} total (after dedup)", 
-                            new_count, self.emails.len(), merged_emails.len()));
+                        // Sort by date - newest first (descending order)
+                        all_emails.sort_by(|a, b| b.date.cmp(&a.date));
                         
-                        self.emails = merged_emails;
+                        debug_log(&format!("Merged emails: {} new + {} existing = {} total (after dedup and sort)", 
+                            new_count, self.emails.len(), all_emails.len()));
+                        
+                        self.emails = all_emails;
                         
                         // Update the account's cached emails
                         if let Some(account_data) = self.accounts.get_mut(&self.current_account_idx) {

@@ -1210,7 +1210,7 @@ impl EmailClient {
                 let flags: Vec<String> = message
                     .flags()
                     .iter()
-                    .map(|f| f.to_string())
+                    .map(|f| f.to_string()) // Use consistent flag parsing
                     .collect();
                 
                 debug_log(&format!("Message {}: UID={}, body_length={}, flags={:?}", 
@@ -1560,7 +1560,7 @@ impl EmailClient {
         let mut emails = Vec::new();
         for (i, message) in messages.iter().enumerate() {
             if let Some(body) = message.body() {
-                let flags: Vec<String> = message.flags().iter().map(|f| format!("{:?}", f)).collect();
+                let flags: Vec<String> = message.flags().iter().map(|f| f.to_string()).collect();
                 let uid = message.uid.unwrap_or(0).to_string();
                 
                 debug_log(&format!("Processing new email {}: UID={}, size={} bytes, flags={:?}", 
@@ -1616,7 +1616,7 @@ impl EmailClient {
         let mut emails = Vec::new();
         for (i, message) in messages.iter().enumerate() {
             if let Some(body) = message.body() {
-                let flags: Vec<String> = message.flags().iter().map(|f| format!("{:?}", f)).collect();
+                let flags: Vec<String> = message.flags().iter().map(|f| f.to_string()).collect();
                 let uid = message.uid.unwrap_or(0).to_string();
                 
                 debug_log(&format!("Processing new email {}: UID={}, size={} bytes, flags={:?}", 
