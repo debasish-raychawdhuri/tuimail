@@ -1,1 +1,5 @@
 /target
+debug_spell
+debug_spell.rs
+test_spellcheck.rs
+*.log
