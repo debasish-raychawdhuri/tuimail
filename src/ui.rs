@@ -1134,11 +1134,13 @@ fn render_help_mode(f: &mut Frame, _app: &App, area: Rect) {
     f.render_widget(help, centered_area);
 }
 
-fn render_delete_confirm_mode(f: &mut Frame, app: &App, area: Rect) {
-    // First render the normal mode in the background
-    render_normal_mode(f, app, area);
+fn render_delete_confirm_mode(f: &mut Frame, _app: &App, area: Rect) {
+    // DO NOT render normal mode in background - that's what makes it transparent!
+    // Instead, render a solid background across the entire area first
+    let full_background = Block::default().style(Style::default().bg(Color::Black));
+    f.render_widget(full_background, area);
     
-    // Create the confirmation dialog with white text on black background for maximum contrast
+    // Create the confirmation dialog with completely solid styling
     let dialog_text = vec![
         Line::from(""),
         Line::from(vec![
@@ -1175,11 +1177,7 @@ fn render_delete_confirm_mode(f: &mut Frame, app: &App, area: Rect) {
     // Center the dialog on screen
     let dialog_area = centered_rect(50, 30, area);
     
-    // First render a completely opaque black background to block everything behind
-    let background_block = Block::default().style(Style::default().bg(Color::Black));
-    f.render_widget(background_block, dialog_area);
-    
-    // Then render the dialog on top
+    // Render the dialog on the solid black background
     f.render_widget(dialog, dialog_area);
 }
 
