@@ -1138,18 +1138,26 @@ fn render_delete_confirm_mode(f: &mut Frame, app: &App, area: Rect) {
     // First render the normal mode in the background
     render_normal_mode(f, app, area);
     
-    // Create the confirmation dialog
+    // Create the confirmation dialog with white text on black background for maximum contrast
     let dialog_text = vec![
         Line::from(""),
         Line::from(vec![
-            Span::styled("⚠️  Delete Email Confirmation", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD))
+            Span::styled("⚠️  Delete Email Confirmation", Style::default().fg(Color::Red).bg(Color::Black).add_modifier(Modifier::BOLD))
         ]),
         Line::from(""),
-        Line::from("Are you sure you want to delete this email?"),
-        Line::from("This action cannot be undone."),
+        Line::from(vec![
+            Span::styled("Are you sure you want to delete this email?", Style::default().fg(Color::White).bg(Color::Black))
+        ]),
+        Line::from(vec![
+            Span::styled("This action cannot be undone.", Style::default().fg(Color::White).bg(Color::Black))
+        ]),
         Line::from(""),
-        Line::from("Press 'y' to confirm deletion"),
-        Line::from("Press 'n' or Esc to cancel"),
+        Line::from(vec![
+            Span::styled("Press 'y' to confirm deletion", Style::default().fg(Color::Green).bg(Color::Black))
+        ]),
+        Line::from(vec![
+            Span::styled("Press 'n' or Esc to cancel", Style::default().fg(Color::Yellow).bg(Color::Black))
+        ]),
         Line::from(""),
     ];
     
@@ -1158,16 +1166,20 @@ fn render_delete_confirm_mode(f: &mut Frame, app: &App, area: Rect) {
             Block::default()
                 .title("Confirm Delete")
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Red))
-                .style(Style::default().bg(Color::DarkGray))
+                .border_style(Style::default().fg(Color::Red).bg(Color::Black))
+                .style(Style::default().bg(Color::Black))
         )
         .alignment(Alignment::Center)
-        .style(Style::default().bg(Color::DarkGray));
+        .style(Style::default().bg(Color::Black));
     
     // Center the dialog on screen
     let dialog_area = centered_rect(50, 30, area);
     
-    // Render the dialog with solid background
+    // First render a completely opaque black background to block everything behind
+    let background_block = Block::default().style(Style::default().bg(Color::Black));
+    f.render_widget(background_block, dialog_area);
+    
+    // Then render the dialog on top
     f.render_widget(dialog, dialog_area);
 }
 
