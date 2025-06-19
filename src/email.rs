@@ -1419,7 +1419,7 @@ impl EmailClient {
                             match session.select(&email.folder) {
                                 Ok(_) => {
                                     debug_log(&format!("Attempting STORE command with UID: {}", email.id));
-                                    session.uid_store(&email.id, "+FLAGS (\\\\Seen)")
+                                    session.uid_store(&email.id, "+FLAGS (\\Seen)")
                                         .map_err(|e| EmailError::ImapError(e.to_string()))
                                 }
                                 Err(e) => Err(EmailError::ImapError(e.to_string()))
@@ -1434,7 +1434,7 @@ impl EmailClient {
                             match session.select(&email.folder) {
                                 Ok(_) => {
                                     debug_log(&format!("Attempting STORE command with UID: {}", email.id));
-                                    session.uid_store(&email.id, "+FLAGS (\\\\Seen)")
+                                    session.uid_store(&email.id, "+FLAGS (\\Seen)")
                                         .map_err(|e| EmailError::ImapError(e.to_string()))
                                 }
                                 Err(e) => Err(EmailError::ImapError(e.to_string()))
@@ -1480,7 +1480,7 @@ impl EmailClient {
                     .map_err(|e| EmailError::ImapError(e.to_string()))?;
                 
                 session
-                    .uid_store(&email.id, "-FLAGS (\\\\Seen)")
+                    .uid_store(&email.id, "-FLAGS (\\Seen)")
                     .map_err(|e| EmailError::ImapError(e.to_string()))?;
                 
                 Ok(())
@@ -1492,7 +1492,7 @@ impl EmailClient {
                     .map_err(|e| EmailError::ImapError(e.to_string()))?;
                 
                 session
-                    .uid_store(&email.id, "-FLAGS (\\\\Seen)")
+                    .uid_store(&email.id, "-FLAGS (\\Seen)")
                     .map_err(|e| EmailError::ImapError(e.to_string()))?;
                 
                 Ok(())
@@ -1515,7 +1515,7 @@ impl EmailClient {
                     .map_err(|e| EmailError::ImapError(e.to_string()))?;
                 
                 session
-                    .uid_store(&email.id, "+FLAGS (\\\\Deleted)")
+                    .uid_store(&email.id, "+FLAGS (\\Deleted)")
                     .map_err(|e| EmailError::ImapError(e.to_string()))?;
                 
                 session
@@ -1531,7 +1531,7 @@ impl EmailClient {
                     .map_err(|e| EmailError::ImapError(e.to_string()))?;
                 
                 session
-                    .uid_store(&email.id, "+FLAGS (\\\\Deleted)")
+                    .uid_store(&email.id, "+FLAGS (\\Deleted)")
                     .map_err(|e| EmailError::ImapError(e.to_string()))?;
                 
                 session

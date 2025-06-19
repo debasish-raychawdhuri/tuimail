@@ -1,16 +1,24 @@
-# IMAP "Invalid messageset" Error Fix
+# IMAP "Invalid messageset" and "Invalid system flag" Error Fix
 
 ## Problem Description
 The TUImail client was experiencing IMAP errors when trying to mark emails as read:
+
+**Initial Error:**
 ```
 ERROR: Failed to mark email as read: IMAP error: Bad Response: Error in IMAP command STORE: Invalid messageset (0.001 + 0.000 secs).
 ```
 
+**Secondary Error (after initial fix):**
+```
+ERROR: Failed to mark email as read: IMAP error: Bad Response: Error in IMAP command UID STORE: Invalid system flag \\SEEN (0.001 + 0.000 secs).
+```
+
 ## Root Cause Analysis
-The issue was caused by:
+The issue was caused by multiple problems:
 1. **Invalid UID handling**: Email fetching code used `message.uid.unwrap_or(0)` which set email IDs to `"0"` when UIDs were `None`
 2. **Wrong STORE command**: Using `session.store()` instead of `session.uid_store()` for UID-based operations
 3. **No validation**: No validation of email IDs before attempting IMAP STORE operations
+4. **Incorrect flag format**: Using `\\\\Seen` (double backslash) instead of `\\Seen` (single backslash) in IMAP flag commands
 
 ## Solution Implemented
 
@@ -59,7 +67,22 @@ if email.id.is_empty() || email.id == "0" {
 }
 
 debug_log(&format!("Attempting STORE command with UID: {}", email.id));
-session.uid_store(&email.id, "+FLAGS (\\\\Seen)")
+session.uid_store(&email.id, "+FLAGS (\\Seen)")
+```
+
+### 3. Fixed IMAP Flag Format
+**Problem**: IMAP flags were using incorrect format with double backslashes
+
+**Before**:
+```rust
+session.uid_store(&email.id, "+FLAGS (\\\\Seen)")  // Wrong: double backslash
+session.uid_store(&email.id, "+FLAGS (\\\\Deleted)")
+```
+
+**After**:
+```rust
+session.uid_store(&email.id, "+FLAGS (\\Seen)")    // Correct: single backslash  
+session.uid_store(&email.id, "+FLAGS (\\Deleted)")
 ```
 
 ## Technical Details
@@ -80,8 +103,9 @@ session.uid_store(&email.id, "+FLAGS (\\\\Seen)")
 - Graceful handling of emails without valid UIDs
 
 ## Impact
-- **Eliminates IMAP errors**: No more "Invalid messageset" errors
+- **Eliminates IMAP errors**: No more "Invalid messageset" or "Invalid system flag" errors
 - **Improved reliability**: Proper UID validation prevents invalid operations
+- **Correct flag format**: IMAP flags now use proper single backslash format
 - **Better debugging**: Enhanced logging for troubleshooting
 - **Backward compatibility**: Changes don't affect existing functionality
 
@@ -101,6 +125,7 @@ session.uid_store(&email.id, "+FLAGS (\\\\Seen)")
 ## Key Improvements
 1. **Robust UID handling**: Proper validation and error handling for email UIDs
 2. **Correct IMAP commands**: Using UID-based STORE operations
-3. **Better error messages**: Clear indication of invalid email IDs
-4. **Enhanced debugging**: Detailed logging for IMAP operations
-5. **Graceful degradation**: Skip invalid emails instead of crashing
+3. **Proper flag format**: Single backslash format for IMAP flags (`\Seen`, `\Deleted`)
+4. **Better error messages**: Clear indication of invalid email IDs
+5. **Enhanced debugging**: Detailed logging for IMAP operations
+6. **Graceful degradation**: Skip invalid emails instead of crashing
