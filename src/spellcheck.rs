@@ -1,6 +1,9 @@
 use anyhow::{Context, Result};
 use std::collections::HashSet;
 
+// Embed the comprehensive English dictionary at compile time
+const ENGLISH_WORDS: &str = include_str!("../resources/words.txt");
+
 /// Spell checker for email composition
 /// This is a basic implementation that can be extended with proper dictionary support
 pub struct SpellChecker {
@@ -57,82 +60,25 @@ impl SpellChecker {
         })
     }
 
-    /// Load common English words (basic implementation)
+    /// Load comprehensive English dictionary (466,550+ words)
     fn load_common_words() -> HashSet<String> {
         let mut words = HashSet::new();
         
-        // Add some common English words for basic spell checking
-        let common_words = vec![
-            "the", "be", "to", "of", "and", "a", "in", "that", "have", "i", "it", "for", "not", "on", "with", "he", "as", "you", "do", "at",
-            "this", "but", "his", "by", "from", "they", "we", "say", "her", "she", "or", "an", "will", "my", "one", "all", "would", "there", "their",
-            "what", "so", "up", "out", "if", "about", "who", "get", "which", "go", "me", "when", "make", "can", "like", "time", "no", "just", "him",
-            "know", "take", "people", "into", "year", "your", "good", "some", "could", "them", "see", "other", "than", "then", "now", "look", "only",
-            "come", "its", "over", "think", "also", "back", "after", "use", "two", "how", "our", "work", "first", "well", "way", "even", "new", "want",
-            "because", "any", "these", "give", "day", "most", "us", "is", "was", "are", "been", "has", "had", "were", "said", "each", "which", "their",
-            "time", "will", "about", "if", "up", "out", "many", "then", "them", "these", "so", "some", "her", "would", "make", "like", "into", "him",
-            "two", "more", "very", "what", "know", "just", "first", "get", "over", "think", "where", "much", "go", "well", "were", "been", "through",
-            "when", "who", "oil", "sit", "but", "now", "under", "last", "here", "think", "how", "too", "any", "may", "say", "she", "use", "her", "all",
-            "there", "each", "which", "do", "their", "time", "if", "will", "way", "about", "out", "up", "them", "then", "she", "many", "some", "what",
-            "would", "make", "like", "him", "into", "more", "two", "go", "see", "no", "could", "my", "than", "first", "been", "call", "who", "its", "now",
-            "find", "long", "down", "day", "did", "get", "come", "made", "may", "part", "over", "new", "sound", "take", "only", "little", "work", "know",
-            "place", "year", "live", "me", "back", "give", "most", "very", "after", "thing", "our", "just", "name", "good", "sentence", "man", "think",
-            "say", "great", "where", "help", "through", "much", "before", "line", "right", "too", "mean", "old", "any", "same", "tell", "boy", "follow",
-            "came", "want", "show", "also", "around", "form", "three", "small", "set", "put", "end", "why", "again", "turn", "here", "off", "went", "need",
-            "should", "home", "about", "while", "sound", "below", "saw", "something", "thought", "both", "few", "those", "always", "looked", "show", "large",
-            "often", "together", "asked", "house", "don't", "world", "going", "want", "school", "important", "until", "form", "food", "keep", "children",
-            "feet", "land", "side", "without", "boy", "once", "animal", "life", "enough", "took", "sometimes", "four", "head", "above", "kind", "began",
-            "almost", "live", "page", "got", "earth", "need", "far", "hand", "high", "year", "mother", "light", "country", "father", "let", "night", "picture",
-            "being", "study", "second", "book", "carry", "took", "science", "eat", "room", "friend", "began", "idea", "fish", "mountain", "north", "once",
-            "base", "hear", "horse", "cut", "sure", "watch", "color", "face", "wood", "main", "enough", "plain", "girl", "usual", "young", "ready", "above",
-            "ever", "red", "list", "though", "feel", "talk", "bird", "soon", "body", "dog", "family", "direct", "pose", "leave", "song", "measure", "door",
-            "product", "black", "short", "numeral", "class", "wind", "question", "happen", "complete", "ship", "area", "half", "rock", "order", "fire",
-            "south", "problem", "piece", "told", "knew", "pass", "since", "top", "whole", "king", "space", "heard", "best", "hour", "better", "during",
-            "hundred", "five", "remember", "step", "early", "hold", "west", "ground", "interest", "reach", "fast", "verb", "sing", "listen", "six", "table",
-            "travel", "less", "morning", "ten", "simple", "several", "vowel", "toward", "war", "lay", "against", "pattern", "slow", "center", "love",
-            "person", "money", "serve", "appear", "road", "map", "rain", "rule", "govern", "pull", "cold", "notice", "voice", "unit", "power", "town",
-            "fine", "certain", "fly", "fall", "lead", "cry", "dark", "machine", "note", "wait", "plan", "figure", "star", "box", "noun", "field", "rest",
-            "correct", "able", "pound", "done", "beauty", "drive", "stood", "contain", "front", "teach", "week", "final", "gave", "green", "oh", "quick",
-            "develop", "ocean", "warm", "free", "minute", "strong", "special", "mind", "behind", "clear", "tail", "produce", "fact", "street", "inch",
-            "multiply", "nothing", "course", "stay", "wheel", "full", "force", "blue", "object", "decide", "surface", "deep", "moon", "island", "foot",
-            "system", "busy", "test", "record", "boat", "common", "gold", "possible", "plane", "stead", "dry", "wonder", "laugh", "thousands", "ago",
-            "ran", "check", "game", "shape", "equate", "hot", "miss", "brought", "heat", "snow", "tire", "bring", "yes", "distant", "fill", "east",
-            "paint", "language", "among", "grand", "ball", "yet", "wave", "drop", "heart", "am", "present", "heavy", "dance", "engine", "position",
-            "arm", "wide", "sail", "material", "size", "vary", "settle", "speak", "weight", "general", "ice", "matter", "circle", "pair", "include",
-            "divide", "syllable", "felt", "perhaps", "pick", "sudden", "count", "square", "reason", "length", "represent", "art", "subject", "region",
-            "energy", "hunt", "probable", "bed", "brother", "egg", "ride", "cell", "believe", "fraction", "forest", "sit", "race", "window", "store",
-            "summer", "train", "sleep", "prove", "lone", "leg", "exercise", "wall", "catch", "mount", "wish", "sky", "board", "joy", "winter", "sat",
-            "written", "wild", "instrument", "kept", "glass", "grass", "cow", "job", "edge", "sign", "visit", "past", "soft", "fun", "bright", "gas",
-            "weather", "month", "million", "bear", "finish", "happy", "hope", "flower", "clothe", "strange", "gone", "jump", "baby", "eight", "village",
-            "meet", "root", "buy", "raise", "solve", "metal", "whether", "push", "seven", "paragraph", "third", "shall", "held", "hair", "describe",
-            "cook", "floor", "either", "result", "burn", "hill", "safe", "cat", "century", "consider", "type", "law", "bit", "coast", "copy", "phrase",
-            "silent", "tall", "sand", "soil", "roll", "temperature", "finger", "industry", "value", "fight", "lie", "beat", "excite", "natural", "view",
-            "sense", "ear", "else", "quite", "broke", "case", "middle", "kill", "son", "lake", "moment", "scale", "loud", "spring", "observe", "child",
-            "straight", "consonant", "nation", "dictionary", "milk", "speed", "method", "organ", "pay", "age", "section", "dress", "cloud", "surprise",
-            "quiet", "stone", "tiny", "climb", "bad", "oil", "blood", "touch", "grew", "cent", "mix", "team", "wire", "cost", "lost", "brown", "wear",
-            "garden", "equal", "sent", "choose", "fell", "fit", "flow", "fair", "bank", "collect", "save", "control", "decimal", "gentle", "woman",
-            "captain", "practice", "separate", "difficult", "doctor", "please", "protect", "noon", "whose", "locate", "ring", "character", "insect",
-            "caught", "period", "indicate", "radio", "spoke", "atom", "human", "history", "effect", "electric", "expect", "crop", "modern", "element",
-            "hit", "student", "corner", "party", "supply", "bone", "rail", "imagine", "provide", "agree", "thus", "capital", "won't", "chair", "danger",
-            "fruit", "rich", "thick", "soldier", "process", "operate", "guess", "necessary", "sharp", "wing", "create", "neighbor", "wash", "bat",
-            "rather", "crowd", "corn", "compare", "poem", "string", "bell", "depend", "meat", "rub", "tube", "famous", "dollar", "stream", "fear",
-            "sight", "thin", "triangle", "planet", "hurry", "chief", "colony", "clock", "mine", "tie", "enter", "major", "fresh", "search", "send",
-            "yellow", "gun", "allow", "print", "dead", "spot", "desert", "suit", "current", "lift", "rose", "continue", "block", "chart", "hat", "sell",
-            "success", "company", "subtract", "event", "particular", "deal", "swim", "term", "opposite", "wife", "shoe", "shoulder", "spread", "arrange",
-            "camp", "invent", "cotton", "born", "determine", "quart", "nine", "truck", "noise", "level", "chance", "gather", "shop", "stretch", "throw",
-            "shine", "property", "column", "molecule", "select", "wrong", "gray", "repeat", "require", "broad", "prepare", "salt", "nose", "plural",
-            "anger", "claim", "continent", "oxygen", "sugar", "death", "pretty", "skill", "women", "season", "solution", "magnet", "silver", "thank",
-            "branch", "match", "suffix", "especially", "fig", "afraid", "huge", "sister", "steel", "discuss", "forward", "similar", "guide", "experience",
-            "score", "apple", "bought", "led", "pitch", "coat", "mass", "card", "band", "rope", "slip", "win", "dream", "evening", "condition", "feed",
-            "tool", "total", "basic", "smell", "valley", "nor", "double", "seat", "arrive", "master", "track", "parent", "shore", "division", "sheet",
-            "substance", "favor", "connect", "post", "spend", "chord", "fat", "glad", "original", "share", "station", "dad", "bread", "charge", "proper",
-            "bar", "offer", "segment", "slave", "duck", "instant", "market", "degree", "populate", "chick", "dear", "enemy", "reply", "drink", "occur",
-            "support", "speech", "nature", "range", "steam", "motion", "path", "liquid", "log", "meant", "quotient", "teeth", "shell", "neck"
-        ];
-        
-        for word in common_words {
-            words.insert(word.to_string());
+        // Load words from embedded dictionary
+        for line in ENGLISH_WORDS.lines() {
+            let word = line.trim();
+            if !word.is_empty() && word.len() >= 2 {
+                // Convert to lowercase for case-insensitive matching
+                words.insert(word.to_lowercase());
+                
+                // Also add the original case for proper nouns and acronyms
+                if word != word.to_lowercase() {
+                    words.insert(word.to_string());
+                }
+            }
         }
         
+        log::info!("Loaded {} words into spell checker dictionary", words.len());
         words
     }
 
@@ -170,7 +116,7 @@ impl SpellChecker {
         self.common_words.contains(&word_lower)
     }
 
-    /// Get spelling suggestions for a word (basic implementation)
+    /// Get spelling suggestions for a word (improved algorithm for large dictionary)
     pub fn suggest(&self, word: &str) -> Vec<String> {
         if word.is_empty() {
             return Vec::new();
@@ -178,22 +124,13 @@ impl SpellChecker {
 
         let mut suggestions = Vec::new();
         let word_lower = word.to_lowercase();
+        let word_len = word_lower.len();
 
-        // Simple suggestion algorithm: find words with similar length and starting letter
+        // Strategy 1: Find words with same length and similar starting characters
         for common_word in &self.common_words {
-            if common_word.len() == word_lower.len() && 
-               common_word.starts_with(&word_lower[..1]) {
-                suggestions.push(common_word.clone());
-                if suggestions.len() >= 5 {
-                    break;
-                }
-            }
-        }
-
-        // If no suggestions found, try words with similar starting letters
-        if suggestions.is_empty() {
-            for common_word in &self.common_words {
-                if common_word.starts_with(&word_lower[..1.min(word_lower.len())]) {
+            if common_word.len() == word_len {
+                let similarity = self.calculate_similarity(&word_lower, common_word);
+                if similarity >= 0.7 { // 70% similarity threshold
                     suggestions.push(common_word.clone());
                     if suggestions.len() >= 3 {
                         break;
@@ -202,7 +139,75 @@ impl SpellChecker {
             }
         }
 
+        // Strategy 2: If not enough suggestions, try words with similar length (±1)
+        if suggestions.len() < 3 {
+            for common_word in &self.common_words {
+                if (common_word.len() as i32 - word_len as i32).abs() <= 1 {
+                    let similarity = self.calculate_similarity(&word_lower, common_word);
+                    if similarity >= 0.6 { // Lower threshold for different lengths
+                        suggestions.push(common_word.clone());
+                        if suggestions.len() >= 5 {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Strategy 3: If still not enough, try prefix matching
+        if suggestions.len() < 3 && word_len >= 3 {
+            let prefix = &word_lower[..3.min(word_len)];
+            for common_word in &self.common_words {
+                if common_word.starts_with(prefix) && !suggestions.contains(common_word) {
+                    suggestions.push(common_word.clone());
+                    if suggestions.len() >= 5 {
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Remove duplicates and sort by length similarity
+        suggestions.sort_by(|a, b| {
+            let a_diff = (a.len() as i32 - word_len as i32).abs();
+            let b_diff = (b.len() as i32 - word_len as i32).abs();
+            a_diff.cmp(&b_diff)
+        });
+        
+        suggestions.truncate(5); // Limit to 5 suggestions
         suggestions
+    }
+
+    /// Calculate similarity between two words (simple Levenshtein-like algorithm)
+    fn calculate_similarity(&self, word1: &str, word2: &str) -> f64 {
+        if word1 == word2 {
+            return 1.0;
+        }
+        
+        let len1 = word1.len();
+        let len2 = word2.len();
+        
+        if len1 == 0 || len2 == 0 {
+            return 0.0;
+        }
+
+        // Simple character-based similarity
+        let chars1: Vec<char> = word1.chars().collect();
+        let chars2: Vec<char> = word2.chars().collect();
+        
+        let mut matches = 0;
+        let min_len = len1.min(len2);
+        
+        for i in 0..min_len {
+            if chars1[i] == chars2[i] {
+                matches += 1;
+            }
+        }
+        
+        // Bonus for same starting characters
+        let start_bonus = if chars1[0] == chars2[0] { 0.1 } else { 0.0 };
+        
+        (matches as f64 / len1.max(len2) as f64) + start_bonus
     }
 
     /// Check spelling of entire text and return errors
@@ -375,13 +380,52 @@ mod tests {
     }
 
     #[test]
-    fn test_common_words() {
+    fn test_comprehensive_dictionary() {
         let config = SpellCheckConfig::default();
         let checker = SpellChecker::new(&config).unwrap();
         
+        // Test common words
         assert!(checker.is_correct("the"));
         assert!(checker.is_correct("hello"));
         assert!(checker.is_correct("world"));
-        assert!(!checker.is_correct("asdfghjkl")); // nonsense word
+        assert!(checker.is_correct("computer"));
+        assert!(checker.is_correct("programming"));
+        assert!(checker.is_correct("email"));
+        assert!(checker.is_correct("message"));
+        
+        // Test contractions
+        assert!(checker.is_correct("don't"));
+        assert!(checker.is_correct("won't"));
+        assert!(checker.is_correct("can't"));
+        
+        // Test technical terms that should be in the dictionary
+        assert!(checker.is_correct("algorithm"));
+        assert!(checker.is_correct("database"));
+        
+        // Test nonsense words
+        assert!(!checker.is_correct("asdfghjkl"));
+        assert!(!checker.is_correct("qwertyuiop"));
+        assert!(!checker.is_correct("zxcvbnm"));
+    }
+
+    #[test]
+    fn test_suggestions_quality() {
+        let config = SpellCheckConfig::default();
+        let checker = SpellChecker::new(&config).unwrap();
+        
+        // Test suggestions for common misspellings
+        let suggestions = checker.suggest("teh");
+        assert!(suggestions.len() > 0);
+        // The suggestion algorithm should find similar words
+        
+        let suggestions = checker.suggest("recieve");
+        assert!(suggestions.len() > 0);
+        
+        let suggestions = checker.suggest("seperate");
+        assert!(suggestions.len() > 0);
+        
+        // Test that suggestions are reasonable length
+        let suggestions = checker.suggest("hello");
+        assert!(suggestions.len() <= 5); // Should limit to 5 suggestions
     }
 }

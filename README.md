@@ -97,14 +97,15 @@ When spell suggestions are shown:
 
 ## Spell Checking
 
-TUImail includes a built-in spell checker that helps you write error-free emails:
+TUImail includes a comprehensive built-in spell checker with **466,550+ English words** that helps you write error-free emails:
 
 ### Features
+- **Comprehensive Dictionary**: 466,550+ English words from the dwyl/english-words repository
 - **Real-time checking**: Spell checking as you type
-- **Visual indicators**: Misspelled words are highlighted
-- **Smart suggestions**: Context-aware spelling suggestions
+- **Smart suggestions**: Advanced similarity-based spelling suggestions
 - **Personal dictionary**: Add custom words to avoid false positives
 - **Configurable**: Enable/disable spell checking as needed
+- **Performance optimized**: Efficient HashSet-based word lookup
 
 ### How It Works
 - Spell checking is enabled by default for Subject and Body fields
@@ -127,6 +128,15 @@ The spell checker intelligently skips:
 - All-uppercase words (like acronyms)
 - Words containing numbers
 - Very short words (< 2 characters)
+
+### Dictionary Coverage
+The comprehensive dictionary includes:
+- Common English words and vocabulary
+- Technical terms and programming terminology
+- Contractions (don't, won't, can't, etc.)
+- Proper nouns and place names
+- Scientific and academic terminology
+- Business and professional vocabulary
 
 ## Supported Email Providers
 
