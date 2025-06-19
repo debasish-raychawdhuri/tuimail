@@ -1,5 +1,5 @@
 use ratatui::{
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, Paragraph, Tabs, Wrap},
@@ -340,6 +340,12 @@ fn render_email_body(f: &mut Frame, email: &Email, area: Rect) {
 }
 
 fn render_compose_mode(f: &mut Frame, app: &App, area: Rect) {
+    // If showing spell suggestions, render the suggestion popup
+    if app.show_spell_suggestions {
+        render_spell_suggestions(f, app, area);
+        return;
+    }
+    
     // If in attachment input mode, show the input dialog
     if app.attachment_input_mode {
         render_attachment_input_dialog(f, app, area);
@@ -351,12 +357,14 @@ fn render_compose_mode(f: &mut Frame, app: &App, area: Rect) {
         vec![
             Constraint::Length(8), // Header fields
             Constraint::Min(0),    // Body
+            Constraint::Length(1), // Spell check status
         ]
     } else {
         vec![
             Constraint::Length(8), // Header fields
             Constraint::Length(4 + app.compose_email.attachments.len().min(3) as u16), // Attachments (max 3 visible)
             Constraint::Min(0),    // Body
+            Constraint::Length(1), // Spell check status
         ]
     };
     
@@ -456,6 +464,113 @@ fn render_compose_mode(f: &mut Frame, app: &App, area: Rect) {
         .wrap(Wrap { trim: false });
     
     f.render_widget(body, chunks[body_chunk_idx]);
+    
+    // Render spell check status bar
+    let status_chunk_idx = if app.compose_email.attachments.is_empty() {
+        2
+    } else {
+        3
+    };
+    
+    if status_chunk_idx < chunks.len() {
+        render_spell_check_status(f, app, chunks[status_chunk_idx]);
+    }
+}
+
+fn render_spell_check_status(f: &mut Frame, app: &App, area: Rect) {
+    let status_text = if app.spell_check_enabled {
+        if let Some(stats) = app.get_spell_stats() {
+            if stats.misspelled_words > 0 {
+                format!(
+                    "Spell Check: {} errors | Alt+S: Toggle | Alt+G: Suggestions | Alt+D: Add to dict | Accuracy: {:.1}%",
+                    stats.misspelled_words,
+                    stats.accuracy
+                )
+            } else {
+                "Spell Check: No errors | Alt+S: Toggle | Alt+G: Suggestions | Alt+D: Add to dict".to_string()
+            }
+        } else {
+            "Spell Check: Enabled | Alt+S: Toggle | Alt+G: Suggestions | Alt+D: Add to dict".to_string()
+        }
+    } else {
+        "Spell Check: Disabled | Alt+S: Enable".to_string()
+    };
+
+    let status_color = if app.spell_check_enabled {
+        if app.spell_errors.is_empty() {
+            Color::Green
+        } else {
+            Color::Yellow
+        }
+    } else {
+        Color::Gray
+    };
+
+    let status = Paragraph::new(status_text)
+        .style(Style::default().fg(status_color))
+        .alignment(Alignment::Left);
+
+    f.render_widget(status, area);
+}
+
+fn render_spell_suggestions(f: &mut Frame, app: &App, area: Rect) {
+    // Find the current error at cursor position
+    let mut current_error: Option<&crate::spellcheck::SpellError> = None;
+    for error in &app.spell_errors {
+        let word_end = error.position + error.word.len();
+        if app.compose_cursor_pos >= error.position && app.compose_cursor_pos <= word_end {
+            current_error = Some(error);
+            break;
+        }
+    }
+
+    if let Some(error) = current_error {
+        // Create a popup in the center of the screen
+        let popup_area = centered_rect(50, 60, area);
+        
+        // Clear the background
+        let clear = Block::default().style(Style::default().bg(Color::Black));
+        f.render_widget(clear, area);
+
+        // Create suggestion items
+        let items: Vec<ListItem> = error.suggestions
+            .iter()
+            .enumerate()
+            .map(|(i, suggestion)| {
+                let style = if i == app.selected_spell_suggestion {
+                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::White)
+                };
+                ListItem::new(suggestion.as_str()).style(style)
+            })
+            .collect();
+
+        let suggestions_list = List::new(items)
+            .block(Block::default()
+                .title(format!("Suggestions for '{}'", error.word))
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Yellow)))
+            .highlight_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+
+        f.render_widget(suggestions_list, popup_area);
+
+        // Add help text at the bottom
+        let help_area = Rect {
+            x: popup_area.x,
+            y: popup_area.y + popup_area.height,
+            width: popup_area.width,
+            height: 1,
+        };
+
+        if help_area.y < area.height {
+            let help_text = "↑↓: Navigate | Enter: Apply | Esc: Cancel";
+            let help = Paragraph::new(help_text)
+                .style(Style::default().fg(Color::Gray))
+                .alignment(Alignment::Center);
+            f.render_widget(help, help_area);
+        }
+    }
 }
 
 fn render_file_browser(f: &mut Frame, app: &App, area: Rect) {

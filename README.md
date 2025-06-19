@@ -9,6 +9,7 @@ A terminal-based email client built with Rust and Ratatui.
 - **IMAP Support**: Connect to IMAP servers (Gmail, Outlook, etc.)
 - **Email Composition**: Compose and send emails with attachments
 - **Attachment Management**: Save and attach files with enhanced file browser
+- **Spell Checking**: Built-in spell checker for email composition
 - **Secure Credentials**: Encrypted password storage using system keyring
 - **Folder Navigation**: Browse email folders and organize messages
 
@@ -83,6 +84,49 @@ Debug logs are written to `/tmp/tuimail_debug.log`.
 - `Ctrl+S`: Send email
 - `Tab`: Navigate between fields
 - `Esc`: Cancel composition
+
+#### Spell Checking in Compose Mode
+- `Alt+S`: Toggle spell checking on/off
+- `Alt+G`: Show spelling suggestions for word at cursor
+- `Alt+D`: Add word at cursor to personal dictionary
+
+When spell suggestions are shown:
+- `↑/↓`: Navigate suggestions
+- `Enter`: Apply selected suggestion
+- `Esc`: Cancel suggestions
+
+## Spell Checking
+
+TUImail includes a built-in spell checker that helps you write error-free emails:
+
+### Features
+- **Real-time checking**: Spell checking as you type
+- **Visual indicators**: Misspelled words are highlighted
+- **Smart suggestions**: Context-aware spelling suggestions
+- **Personal dictionary**: Add custom words to avoid false positives
+- **Configurable**: Enable/disable spell checking as needed
+
+### How It Works
+- Spell checking is enabled by default for Subject and Body fields
+- Misspelled words are detected as you type
+- The status bar shows spell check information and error count
+- Use `Alt+G` to get suggestions for the word at your cursor
+- Use `Alt+D` to add words to your personal dictionary
+
+### Spell Check Status Bar
+The bottom of the compose window shows:
+- Current spell check status (enabled/disabled)
+- Number of spelling errors found
+- Spelling accuracy percentage
+- Available keyboard shortcuts
+
+### Smart Word Detection
+The spell checker intelligently skips:
+- Email addresses (user@domain.com)
+- URLs (http://example.com)
+- All-uppercase words (like acronyms)
+- Words containing numbers
+- Very short words (< 2 characters)
 
 ## Supported Email Providers
 

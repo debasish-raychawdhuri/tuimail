@@ -120,6 +120,13 @@ pub struct App {
     pub compose_cursor_pos: usize, // Cursor position in the current field
     pub compose_to_text: String,   // Raw text for To field editing
 
+    // Spell checking
+    pub spell_checker: Option<crate::spellcheck::SpellChecker>,
+    pub spell_errors: Vec<crate::spellcheck::SpellError>,
+    pub spell_check_enabled: bool,
+    pub show_spell_suggestions: bool,
+    pub selected_spell_suggestion: usize,
+
     // Attachment handling
     pub selected_attachment_idx: Option<usize>, // For viewing attachments in received emails
     pub attachment_input_mode: bool,            // Whether we're in file path input mode
@@ -236,6 +243,13 @@ impl App {
             compose_field: ComposeField::To,
             compose_cursor_pos: 0,
             compose_to_text: String::new(),
+            
+            // Initialize spell checking
+            spell_checker: Self::init_spell_checker(),
+            spell_errors: Vec::new(),
+            spell_check_enabled: true,
+            show_spell_suggestions: false,
+            selected_spell_suggestion: 0,
             selected_attachment_idx: None,
             attachment_input_mode: false,
             attachment_input_text: String::new(),
@@ -257,6 +271,179 @@ impl App {
     }
 
     // Multi-account support methods
+
+    /// Initialize spell checker
+    fn init_spell_checker() -> Option<crate::spellcheck::SpellChecker> {
+        let config = crate::spellcheck::SpellCheckConfig::default();
+        match crate::spellcheck::SpellChecker::new(&config) {
+            Ok(checker) => {
+                log::info!("Spell checker initialized successfully");
+                Some(checker)
+            }
+            Err(e) => {
+                log::warn!("Failed to initialize spell checker: {}", e);
+                None
+            }
+        }
+    }
+
+    /// Check spelling of current compose field
+    pub fn check_spelling(&mut self) {
+        if !self.spell_check_enabled {
+            self.spell_errors.clear();
+            return;
+        }
+
+        if let Some(ref checker) = self.spell_checker {
+            let config = crate::spellcheck::SpellCheckConfig::default();
+            
+            let text = match self.compose_field {
+                ComposeField::Subject => &self.compose_email.subject,
+                ComposeField::Body => {
+                    if let Some(ref body) = self.compose_email.body_text {
+                        body
+                    } else {
+                        ""
+                    }
+                }
+                ComposeField::To => return, // Don't spell check email addresses
+            };
+
+            self.spell_errors = checker.check_text(text, &config);
+        }
+    }
+
+    /// Toggle spell checking on/off
+    pub fn toggle_spell_check(&mut self) {
+        self.spell_check_enabled = !self.spell_check_enabled;
+        if self.spell_check_enabled {
+            self.check_spelling();
+            self.show_info("Spell checking enabled");
+        } else {
+            self.spell_errors.clear();
+            self.show_info("Spell checking disabled");
+        }
+    }
+
+    /// Show spell suggestions for word at cursor
+    pub fn show_spell_suggestions_at_cursor(&mut self) {
+        if !self.spell_check_enabled || self.spell_checker.is_none() {
+            return;
+        }
+
+        // Find if cursor is on a misspelled word
+        for error in &self.spell_errors {
+            let word_end = error.position + error.word.len();
+            if self.compose_cursor_pos >= error.position && self.compose_cursor_pos <= word_end {
+                if !error.suggestions.is_empty() {
+                    self.show_spell_suggestions = true;
+                    self.selected_spell_suggestion = 0;
+                    return;
+                }
+            }
+        }
+        
+        self.show_info("No spelling suggestions available at cursor position");
+    }
+
+    /// Apply selected spell suggestion
+    pub fn apply_spell_suggestion(&mut self) {
+        if !self.show_spell_suggestions || self.spell_checker.is_none() {
+            return;
+        }
+
+        // Find the error at cursor position and collect the needed data
+        let mut replacement_data: Option<(usize, usize, String, String)> = None;
+        
+        for error in &self.spell_errors {
+            let word_end = error.position + error.word.len();
+            if self.compose_cursor_pos >= error.position && self.compose_cursor_pos <= word_end {
+                if self.selected_spell_suggestion < error.suggestions.len() {
+                    let suggestion = error.suggestions[self.selected_spell_suggestion].clone();
+                    replacement_data = Some((error.position, word_end, error.word.clone(), suggestion));
+                    break;
+                }
+            }
+        }
+        
+        if let Some((start_pos, end_pos, original_word, suggestion)) = replacement_data {
+            // Replace the misspelled word with the suggestion
+            match self.compose_field {
+                ComposeField::Subject => {
+                    let mut subject = self.compose_email.subject.clone();
+                    subject.replace_range(start_pos..end_pos, &suggestion);
+                    self.compose_email.subject = subject;
+                    self.compose_cursor_pos = start_pos + suggestion.len();
+                }
+                ComposeField::Body => {
+                    if let Some(ref mut body) = self.compose_email.body_text {
+                        body.replace_range(start_pos..end_pos, &suggestion);
+                        self.compose_cursor_pos = start_pos + suggestion.len();
+                    }
+                }
+                ComposeField::To => {} // Don't spell check email addresses
+            }
+            
+            self.show_spell_suggestions = false;
+            self.check_spelling(); // Recheck after replacement
+            self.show_info(&format!("Replaced '{}' with '{}'", original_word, suggestion));
+        }
+    }
+
+    /// Add word to personal dictionary
+    pub fn add_word_to_dictionary(&mut self) {
+        if self.spell_checker.is_none() {
+            return;
+        }
+
+        // Find the error at cursor position and collect the word
+        let mut word_to_add: Option<String> = None;
+        
+        for error in &self.spell_errors {
+            let word_end = error.position + error.word.len();
+            if self.compose_cursor_pos >= error.position && self.compose_cursor_pos <= word_end {
+                word_to_add = Some(error.word.clone());
+                break;
+            }
+        }
+        
+        if let Some(word) = word_to_add {
+            if let Some(ref mut checker) = self.spell_checker {
+                checker.add_to_personal_dictionary(&word);
+                self.check_spelling(); // Recheck after adding to dictionary
+                self.show_info(&format!("Added '{}' to personal dictionary", word));
+            }
+        } else {
+            self.show_info("No misspelled word at cursor position");
+        }
+    }
+
+    /// Get spell check statistics for current text
+    pub fn get_spell_stats(&self) -> Option<crate::spellcheck::SpellCheckStats> {
+        if !self.spell_check_enabled || self.spell_checker.is_none() {
+            return None;
+        }
+
+        if let Some(ref checker) = self.spell_checker {
+            let config = crate::spellcheck::SpellCheckConfig::default();
+            
+            let text = match self.compose_field {
+                ComposeField::Subject => &self.compose_email.subject,
+                ComposeField::Body => {
+                    if let Some(ref body) = self.compose_email.body_text {
+                        body
+                    } else {
+                        ""
+                    }
+                }
+                ComposeField::To => return None,
+            };
+
+            Some(checker.get_stats(text, &config))
+        } else {
+            None
+        }
+    }
 
     /// Toggle account expansion in folder view
     pub fn toggle_account_expansion(&mut self, account_idx: usize) {
@@ -824,13 +1011,65 @@ impl App {
         }
     }
 
+    /// Handle spell suggestion navigation
+    fn handle_spell_suggestions(&mut self, key: KeyEvent) -> AppResult<()> {
+        match key.code {
+            KeyCode::Esc => {
+                self.show_spell_suggestions = false;
+                Ok(())
+            }
+            KeyCode::Up => {
+                if self.selected_spell_suggestion > 0 {
+                    self.selected_spell_suggestion -= 1;
+                }
+                Ok(())
+            }
+            KeyCode::Down => {
+                // Find current error to get suggestion count
+                for error in &self.spell_errors {
+                    let word_end = error.position + error.word.len();
+                    if self.compose_cursor_pos >= error.position && self.compose_cursor_pos <= word_end {
+                        if self.selected_spell_suggestion < error.suggestions.len().saturating_sub(1) {
+                            self.selected_spell_suggestion += 1;
+                        }
+                        break;
+                    }
+                }
+                Ok(())
+            }
+            KeyCode::Enter => {
+                self.apply_spell_suggestion();
+                Ok(())
+            }
+            _ => Ok(())
+        }
+    }
+
     fn handle_compose_mode(&mut self, key: KeyEvent) -> AppResult<()> {
+        // Handle spell suggestion mode
+        if self.show_spell_suggestions {
+            return self.handle_spell_suggestions(key);
+        }
+
         // Handle attachment input mode separately
         if self.attachment_input_mode {
             return self.handle_attachment_input(key);
         }
 
         match key.code {
+            // Spell checking shortcuts
+            KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::ALT) => {
+                self.toggle_spell_check();
+                Ok(())
+            }
+            KeyCode::Char('g') if key.modifiers.contains(KeyModifiers::ALT) => {
+                self.show_spell_suggestions_at_cursor();
+                Ok(())
+            }
+            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::ALT) => {
+                self.add_word_to_dictionary();
+                Ok(())
+            }
             KeyCode::Esc => {
                 self.mode = AppMode::Normal;
                 self.focus = FocusPanel::EmailList;
@@ -939,6 +1178,8 @@ impl App {
                     }
                     ComposeField::Subject => {
                         self.compose_email.subject.push(c);
+                        // Trigger spell check for subject
+                        self.check_spelling();
                     }
                     ComposeField::Body => {
                         if let Some(ref mut body) = self.compose_email.body_text {
@@ -953,6 +1194,10 @@ impl App {
                         } else {
                             self.compose_email.body_text = Some(c.to_string());
                             self.compose_cursor_pos = 1;
+                        }
+                        // Trigger spell check for body (but only on word boundaries for performance)
+                        if c.is_whitespace() || c.is_ascii_punctuation() {
+                            self.check_spelling();
                         }
                     }
                 }
@@ -983,13 +1228,21 @@ impl App {
                     }
                     ComposeField::Subject => {
                         self.compose_email.subject.pop();
+                        // Trigger spell check for subject
+                        self.check_spelling();
                     }
                     ComposeField::Body => {
                         if let Some(ref mut body) = self.compose_email.body_text {
                             if self.compose_cursor_pos > 0 && self.compose_cursor_pos <= body.len()
                             {
+                                let removed_char = body.chars().nth(self.compose_cursor_pos - 1).unwrap_or(' ');
                                 body.remove(self.compose_cursor_pos - 1);
                                 self.compose_cursor_pos -= 1;
+                                
+                                // Trigger spell check on word boundaries
+                                if removed_char.is_whitespace() || removed_char.is_ascii_punctuation() {
+                                    self.check_spelling();
+                                }
                             }
                         }
                     }
