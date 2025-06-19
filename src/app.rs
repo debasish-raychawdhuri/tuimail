@@ -615,7 +615,8 @@ impl App {
             total_words,
             misspelled_words,
             accuracy: if total_words > 0 {
-                ((total_words - misspelled_words) as f64 / total_words as f64) * 100.0
+                let correct_words = total_words.saturating_sub(misspelled_words);
+                (correct_words as f64 / total_words as f64) * 100.0
             } else {
                 100.0
             },
@@ -2660,9 +2661,9 @@ impl App {
                 if !email.attachments.is_empty() {
                     let current = self.selected_attachment_idx.unwrap_or(0);
                     self.selected_attachment_idx = Some(if current == 0 {
-                        email.attachments.len() - 1
+                        email.attachments.len().saturating_sub(1)
                     } else {
-                        current - 1
+                        current.saturating_sub(1)
                     });
                 }
             }
@@ -2824,7 +2825,7 @@ impl App {
                 if self.compose_email.attachments.is_empty() {
                     self.selected_attachment_idx = None;
                 } else if idx >= self.compose_email.attachments.len() {
-                    self.selected_attachment_idx = Some(self.compose_email.attachments.len() - 1);
+                    self.selected_attachment_idx = Some(self.compose_email.attachments.len().saturating_sub(1));
                 }
 
                 self.show_info(&format!("Removed attachment: {}", filename));
@@ -3055,7 +3056,7 @@ impl App {
                                 self.selected_email_idx = None;
                             } else if idx >= self.emails.len() {
                                 // If we deleted the last email, select the new last email
-                                self.selected_email_idx = Some(self.emails.len() - 1);
+                                self.selected_email_idx = Some(self.emails.len().saturating_sub(1));
                             }
                             // If we deleted an email in the middle, the selection stays the same
                             // which will now point to the next email
