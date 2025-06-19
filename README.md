@@ -9,7 +9,7 @@ A terminal-based email client built with Rust and Ratatui.
 - **IMAP Support**: Connect to IMAP servers (Gmail, Outlook, etc.)
 - **Email Composition**: Compose and send emails with attachments
 - **Attachment Management**: Save and attach files with enhanced file browser
-- **Spell Checking**: Built-in spell checker for email composition
+- **Spell Checking**: Built-in spell checker for email composition with visual highlighting
 - **Secure Credentials**: Encrypted password storage using system keyring
 - **Folder Navigation**: Browse email folders and organize messages
 
@@ -103,6 +103,7 @@ TUImail includes a practical built-in spell checker with **~15,000 carefully cur
 - **Practical Dictionary**: ~15,000 curated English words optimized for real-world email composition
 - **Smart Word Selection**: Google's 10,000 most common English words + technical terms + everyday vocabulary
 - **Real-time checking**: Spell checking as you type
+- **Visual Highlighting**: Misspelled words are highlighted with a red background
 - **Relevant suggestions**: Context-aware spelling suggestions for common misspellings
 - **Personal dictionary**: Add custom words to avoid false positives
 - **Configurable**: Enable/disable spell checking as needed
@@ -126,7 +127,7 @@ Unlike comprehensive dictionaries with 400,000+ words that include obscure terms
 
 ### How It Works
 - Spell checking is enabled by default for Subject and Body fields
-- Misspelled words are detected as you type
+- Misspelled words are detected as you type and highlighted with a red background
 - The status bar shows spell check information and error count
 - Use `Alt+G` to get suggestions for the word at your cursor
 - Use `Alt+D` to add words to your personal dictionary

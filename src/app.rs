@@ -432,29 +432,37 @@ impl App {
 
     /// Get spell check statistics for current text
     pub fn get_spell_stats(&self) -> Option<crate::spellcheck::SpellCheckStats> {
-        if !self.spell_check_enabled || self.spell_checker.is_none() {
+        if !self.spell_check_enabled {
             return None;
         }
 
-        if let Some(ref checker) = self.spell_checker {
-            let config = crate::spellcheck::SpellCheckConfig::default();
-            
-            let text = match self.compose_field {
-                ComposeField::Subject => &self.compose_email.subject,
-                ComposeField::Body => {
-                    if let Some(ref body) = self.compose_email.body_text {
-                        body
-                    } else {
-                        ""
-                    }
+        // Use the already computed spell errors instead of doing a separate check
+        let text = match self.compose_field {
+            ComposeField::Subject => &self.compose_email.subject,
+            ComposeField::Body => {
+                if let Some(ref body) = self.compose_email.body_text {
+                    body
+                } else {
+                    ""
                 }
-                ComposeField::To => return None,
-            };
+            }
+            ComposeField::To => return None,
+        };
 
-            Some(checker.get_stats(text, &config))
-        } else {
-            None
-        }
+        // Count total words in the text
+        let words = crate::spellcheck::SpellChecker::extract_words_static(text);
+        let total_words = words.len();
+        let misspelled_words = self.spell_errors.len();
+        
+        Some(crate::spellcheck::SpellCheckStats {
+            total_words,
+            misspelled_words,
+            accuracy: if total_words > 0 {
+                ((total_words - misspelled_words) as f64 / total_words as f64) * 100.0
+            } else {
+                100.0
+            },
+        })
     }
 
     /// Toggle account expansion in folder view

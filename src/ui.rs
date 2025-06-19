@@ -398,6 +398,43 @@ fn render_compose_mode(f: &mut Frame, app: &App, area: Rect) {
         Style::default().fg(Color::Gray)
     };
     
+    // Create subject text with spell checking if enabled
+    let subject_text = if app.spell_check_enabled && app.compose_field == crate::app::ComposeField::Subject {
+        // Filter errors that are in the subject field
+        let subject_errors: Vec<_> = app.spell_errors.iter()
+            .filter(|_| {
+                // In subject field, we need to check if the error is in the subject
+                // This is a simplification - in a real app you'd track field-specific errors
+                app.compose_field == crate::app::ComposeField::Subject
+            })
+            .cloned()
+            .collect();
+        
+        if !subject_errors.is_empty() {
+            create_highlighted_text(&app.compose_email.subject, &subject_errors, true, app.compose_cursor_pos)
+        } else if app.compose_field == crate::app::ComposeField::Subject {
+            // Just add cursor without highlighting
+            let cursor_pos = app.compose_cursor_pos.min(app.compose_email.subject.len());
+            let mut display_text = app.compose_email.subject.clone();
+            if cursor_pos <= display_text.len() {
+                display_text.insert(cursor_pos, '│');
+            }
+            Line::from(display_text).into()
+        } else {
+            Line::from(app.compose_email.subject.clone()).into()
+        }
+    } else if app.compose_field == crate::app::ComposeField::Subject {
+        // Just add cursor without spell highlighting
+        let cursor_pos = app.compose_cursor_pos.min(app.compose_email.subject.len());
+        let mut display_text = app.compose_email.subject.clone();
+        if cursor_pos <= display_text.len() {
+            display_text.insert(cursor_pos, '│');
+        }
+        Line::from(display_text).into()
+    } else {
+        Line::from(app.compose_email.subject.clone()).into()
+    };
+    
     let header_text = vec![
         Line::from(""),
         Line::from(vec![
@@ -407,8 +444,9 @@ fn render_compose_mode(f: &mut Frame, app: &App, area: Rect) {
         Line::from(""),
         Line::from(vec![
             Span::styled("Subject: ", subject_style),
-            Span::raw(&app.compose_email.subject),
         ]),
+        // Add the subject text with potential highlighting
+        // We can't directly use Line::from(subject_text) because subject_text is already a Text
         Line::from(""),
         Line::from("Tab/↑↓: Navigate fields | Ctrl+S: Send | Esc: Cancel"),
     ];
@@ -417,6 +455,19 @@ fn render_compose_mode(f: &mut Frame, app: &App, area: Rect) {
         .block(Block::default().title("New Email").borders(Borders::ALL));
     
     f.render_widget(header, chunks[0]);
+    
+    // Render subject text separately if it has highlighting
+    if app.spell_check_enabled && app.compose_field == crate::app::ComposeField::Subject {
+        let subject_area = Rect {
+            x: chunks[0].x + 10, // Offset to align with "Subject: " text
+            y: chunks[0].y + 4,  // Position after the "Subject: " line
+            width: chunks[0].width - 12,
+            height: 1,
+        };
+        
+        let subject_para = Paragraph::new(subject_text);
+        f.render_widget(subject_para, subject_area);
+    }
     
     // Render attachments if any
     let body_chunk_idx = if app.compose_email.attachments.is_empty() {
@@ -442,7 +493,13 @@ fn render_compose_mode(f: &mut Frame, app: &App, area: Rect) {
     };
     
     // If we're in the body field, show cursor by inserting a cursor character
-    let display_content = if app.compose_field == crate::app::ComposeField::Body {
+    // and highlight misspelled words with red background
+    let body_content = if app.spell_check_enabled && !app.spell_errors.is_empty() {
+        // Create styled spans with misspelled words highlighted
+        let styled_content = create_highlighted_text(content, &app.spell_errors, app.compose_field == crate::app::ComposeField::Body, app.compose_cursor_pos);
+        styled_content
+    } else if app.compose_field == crate::app::ComposeField::Body {
+        // Just add cursor without spell highlighting
         let cursor_pos = app.compose_cursor_pos.min(content.len());
         let mut display_text = content.to_string();
         
@@ -450,12 +507,15 @@ fn render_compose_mode(f: &mut Frame, app: &App, area: Rect) {
         if cursor_pos <= display_text.len() {
             display_text.insert(cursor_pos, '│'); // Vertical bar as cursor
         }
-        display_text
+        
+        // Convert to Text for rendering
+        Line::from(display_text).into()
     } else {
-        content.to_string()
+        // Plain text without cursor
+        Line::from(content.to_string()).into()
     };
     
-    let body = Paragraph::new(display_content)
+    let body = Paragraph::new(body_content)
         .block(Block::default()
             .borders(Borders::ALL)
             .title(body_title)
@@ -940,4 +1000,79 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
             Constraint::Percentage((100 - percent_x) / 2),
         ])
         .split(popup_layout[1])[1]
+}
+
+/// Helper function to create text with highlighted misspelled words
+fn create_highlighted_text(text: &str, spell_errors: &[crate::spellcheck::SpellError], show_cursor: bool, cursor_pos: usize) -> ratatui::text::Text<'static> {
+    let mut spans = Vec::new();
+    let mut last_pos = 0;
+    
+    // Sort errors by position to process them in order
+    let mut sorted_errors = spell_errors.to_vec();
+    sorted_errors.sort_by_key(|e| e.position);
+    
+    // Process each error and create styled spans
+    for error in sorted_errors {
+        // Add normal text before the error
+        if error.position > last_pos {
+            let normal_text = text[last_pos..error.position].to_string();
+            spans.push(Span::raw(normal_text));
+        }
+        
+        // Add the misspelled word with red background
+        let error_end = error.position + error.word.len();
+        let error_text = text[error.position..error_end].to_string();
+        spans.push(Span::styled(
+            error_text, 
+            Style::default().bg(Color::Red).fg(Color::White)
+        ));
+        
+        last_pos = error_end;
+    }
+    
+    // Add remaining text after the last error
+    if last_pos < text.len() {
+        spans.push(Span::raw(text[last_pos..].to_string()));
+    }
+    
+    // If showing cursor, insert it at the cursor position
+    if show_cursor {
+        let mut final_spans = Vec::new();
+        let mut cursor_inserted = false;
+        
+        for span in spans {
+            if !cursor_inserted && span.content.len() + final_spans.iter().map(|s: &Span| s.content.len()).sum::<usize>() >= cursor_pos {
+                // Need to split this span to insert cursor
+                let span_start = cursor_pos - final_spans.iter().map(|s: &Span| s.content.len()).sum::<usize>();
+                
+                if span_start > 0 {
+                    // Add text before cursor
+                    let before_cursor = span.content.chars().take(span_start).collect::<String>();
+                    final_spans.push(Span::styled(before_cursor, span.style));
+                }
+                
+                // Add cursor
+                final_spans.push(Span::styled("│".to_string(), Style::default().fg(Color::Yellow)));
+                
+                // Add text after cursor
+                let after_cursor = span.content.chars().skip(span_start).collect::<String>();
+                if !after_cursor.is_empty() {
+                    final_spans.push(Span::styled(after_cursor, span.style));
+                }
+                
+                cursor_inserted = true;
+            } else {
+                final_spans.push(span);
+            }
+        }
+        
+        // If cursor wasn't inserted yet, add it at the end
+        if !cursor_inserted {
+            final_spans.push(Span::styled("│".to_string(), Style::default().fg(Color::Yellow)));
+        }
+        
+        ratatui::text::Text::from(Line::from(final_spans))
+    } else {
+        ratatui::text::Text::from(Line::from(spans))
+    }
 }
