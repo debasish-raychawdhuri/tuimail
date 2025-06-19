@@ -127,6 +127,13 @@ pub struct App {
     pub show_spell_suggestions: bool,
     pub selected_spell_suggestion: usize,
 
+    // Grammar checking
+    pub grammar_checker: Option<crate::grammarcheck::GrammarChecker>,
+    pub grammar_errors: Vec<crate::grammarcheck::GrammarError>,
+    pub grammar_check_enabled: bool,
+    pub show_grammar_suggestions: bool,
+    pub selected_grammar_suggestion: usize,
+
     // Attachment handling
     pub selected_attachment_idx: Option<usize>, // For viewing attachments in received emails
     pub attachment_input_mode: bool,            // Whether we're in file path input mode
@@ -250,6 +257,14 @@ impl App {
             spell_check_enabled: true,
             show_spell_suggestions: false,
             selected_spell_suggestion: 0,
+            
+            // Initialize grammar checking
+            grammar_checker: Self::init_grammar_checker(),
+            grammar_errors: Vec::new(),
+            grammar_check_enabled: true,
+            show_grammar_suggestions: false,
+            selected_grammar_suggestion: 0,
+            
             selected_attachment_idx: None,
             attachment_input_mode: false,
             attachment_input_text: String::new(),
@@ -282,6 +297,20 @@ impl App {
             }
             Err(e) => {
                 log::warn!("Failed to initialize spell checker: {}", e);
+                None
+            }
+        }
+    }
+    
+    /// Initialize grammar checker
+    fn init_grammar_checker() -> Option<crate::grammarcheck::GrammarChecker> {
+        match crate::grammarcheck::GrammarChecker::new() {
+            Ok(checker) => {
+                log::info!("Grammar checker initialized successfully");
+                Some(checker)
+            }
+            Err(e) => {
+                log::warn!("Failed to initialize grammar checker: {}", e);
                 None
             }
         }
@@ -320,6 +349,45 @@ impl App {
             let errors = checker.check_text(text, &config);
             log::debug!("Spell check complete. Found {} errors", errors.len());
             self.spell_errors = errors;
+        }
+    }
+    
+    /// Check grammar of current compose field
+    pub fn check_grammar(&mut self) {
+        if !self.grammar_check_enabled {
+            self.grammar_errors.clear();
+            return;
+        }
+
+        if let Some(ref checker) = self.grammar_checker {
+            let config = crate::grammarcheck::GrammarCheckConfig::default();
+            
+            let text = match self.compose_field {
+                ComposeField::Subject => {
+                    log::debug!("Checking grammar for Subject: '{}'", self.compose_email.subject);
+                    &self.compose_email.subject
+                },
+                ComposeField::Body => {
+                    if let Some(ref body) = self.compose_email.body_text {
+                        log::debug!("Checking grammar for Body: '{}'", body);
+                        body
+                    } else {
+                        log::debug!("Body is empty, no grammar checking needed");
+                        ""
+                    }
+                }
+                ComposeField::To => {
+                    log::debug!("Skipping grammar check for To field");
+                    return; // Don't grammar check email addresses
+                }
+            };
+
+            let errors = checker.check_text(text, &config);
+            log::debug!("Grammar check complete. Found {} errors", errors.len());
+            self.grammar_errors = errors;
+        }
+    }
+            self.spell_errors = errors;
         } else {
             log::debug!("Spell checker not available");
         }
@@ -334,6 +402,18 @@ impl App {
         } else {
             self.spell_errors.clear();
             self.show_info("Spell checking disabled");
+        }
+    }
+    
+    /// Toggle grammar checking on/off
+    pub fn toggle_grammar_check(&mut self) {
+        self.grammar_check_enabled = !self.grammar_check_enabled;
+        if self.grammar_check_enabled {
+            self.check_grammar();
+            self.show_info("Grammar checking enabled");
+        } else {
+            self.grammar_errors.clear();
+            self.show_info("Grammar checking disabled");
         }
     }
 
@@ -356,6 +436,26 @@ impl App {
         }
         
         self.show_info("No spelling suggestions available at cursor position");
+    }
+    
+    /// Show grammar suggestions for text at cursor
+    pub fn show_grammar_suggestions_at_cursor(&mut self) {
+        if !self.grammar_check_enabled || self.grammar_checker.is_none() {
+            return;
+        }
+
+        // Find if cursor is in a grammar error range
+        for error in &self.grammar_errors {
+            if self.compose_cursor_pos >= error.start && self.compose_cursor_pos <= error.end {
+                if !error.replacements.is_empty() {
+                    self.show_grammar_suggestions = true;
+                    self.selected_grammar_suggestion = 0;
+                    return;
+                }
+            }
+        }
+        
+        self.show_info("No grammar suggestions available at cursor position");
     }
 
     /// Apply selected spell suggestion
@@ -398,7 +498,63 @@ impl App {
             
             self.show_spell_suggestions = false;
             self.check_spelling(); // Recheck after replacement
+            self.check_grammar(); // Also recheck grammar
             self.show_info(&format!("Replaced '{}' with '{}'", original_word, suggestion));
+        }
+    }
+    
+    /// Apply selected grammar suggestion
+    pub fn apply_grammar_suggestion(&mut self) {
+        if !self.show_grammar_suggestions || self.grammar_checker.is_none() {
+            return;
+        }
+
+        // Find the error at cursor position and collect the needed data
+        let mut replacement_data: Option<(usize, usize, String, String)> = None;
+        
+        for error in &self.grammar_errors {
+            if self.compose_cursor_pos >= error.start && self.compose_cursor_pos <= error.end {
+                if self.selected_grammar_suggestion < error.replacements.len() {
+                    let suggestion = error.replacements[self.selected_grammar_suggestion].clone();
+                    let original_text = match self.compose_field {
+                        ComposeField::Subject => self.compose_email.subject[error.start..error.end].to_string(),
+                        ComposeField::Body => {
+                            if let Some(ref body) = self.compose_email.body_text {
+                                body[error.start..error.end].to_string()
+                            } else {
+                                continue;
+                            }
+                        }
+                        ComposeField::To => continue, // Don't grammar check email addresses
+                    };
+                    replacement_data = Some((error.start, error.end, original_text, suggestion));
+                    break;
+                }
+            }
+        }
+        
+        if let Some((start_pos, end_pos, original_text, suggestion)) = replacement_data {
+            // Replace the grammar error with the suggestion
+            match self.compose_field {
+                ComposeField::Subject => {
+                    let mut subject = self.compose_email.subject.clone();
+                    subject.replace_range(start_pos..end_pos, &suggestion);
+                    self.compose_email.subject = subject;
+                    self.compose_cursor_pos = start_pos + suggestion.len();
+                }
+                ComposeField::Body => {
+                    if let Some(ref mut body) = self.compose_email.body_text {
+                        body.replace_range(start_pos..end_pos, &suggestion);
+                        self.compose_cursor_pos = start_pos + suggestion.len();
+                    }
+                }
+                ComposeField::To => {} // Don't grammar check email addresses
+            }
+            
+            self.show_grammar_suggestions = false;
+            self.check_spelling(); // Recheck spelling
+            self.check_grammar(); // Recheck grammar
+            self.show_info(&format!("Replaced '{}' with '{}'", original_text, suggestion));
         }
     }
 
@@ -459,6 +615,42 @@ impl App {
             misspelled_words,
             accuracy: if total_words > 0 {
                 ((total_words - misspelled_words) as f64 / total_words as f64) * 100.0
+            } else {
+                100.0
+            },
+        })
+    }
+    
+    /// Get grammar check statistics for the current compose field
+    pub fn get_grammar_stats(&self) -> Option<crate::grammarcheck::GrammarCheckStats> {
+        if !self.grammar_check_enabled {
+            return None;
+        }
+
+        // Use the already computed grammar errors
+        let text = match self.compose_field {
+            ComposeField::Subject => &self.compose_email.subject,
+            ComposeField::Body => {
+                if let Some(ref body) = self.compose_email.body_text {
+                    body
+                } else {
+                    ""
+                }
+            }
+            ComposeField::To => return None,
+        };
+
+        // Estimate sentence count (rough approximation)
+        let sentence_count = text.split(['.', '!', '?'])
+            .filter(|s| !s.trim().is_empty())
+            .count();
+        let error_count = self.grammar_errors.len();
+        
+        Some(crate::grammarcheck::GrammarCheckStats {
+            sentence_count,
+            error_count,
+            quality_score: if sentence_count > 0 {
+                100.0 - ((error_count as f64 / sentence_count as f64) * 100.0).min(100.0)
             } else {
                 100.0
             },
@@ -1063,6 +1255,48 @@ impl App {
                 self.apply_spell_suggestion();
                 Ok(())
             }
+            _ => Ok(()),
+        }
+    }
+    
+    fn handle_grammar_suggestions(&mut self, key: KeyEvent) -> AppResult<()> {
+        match key.code {
+            KeyCode::Esc => {
+                self.show_grammar_suggestions = false;
+                Ok(())
+            }
+            KeyCode::Up => {
+                if self.selected_grammar_suggestion > 0 {
+                    self.selected_grammar_suggestion -= 1;
+                }
+                Ok(())
+            }
+            KeyCode::Down => {
+                // Find current error to get suggestion count
+                for error in &self.grammar_errors {
+                    if self.compose_cursor_pos >= error.start && self.compose_cursor_pos <= error.end {
+                        if self.selected_grammar_suggestion < error.replacements.len().saturating_sub(1) {
+                            self.selected_grammar_suggestion += 1;
+                        }
+                        break;
+                    }
+                }
+                Ok(())
+            }
+            KeyCode::Enter => {
+                self.apply_grammar_suggestion();
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+                }
+                Ok(())
+            }
+            KeyCode::Enter => {
+                self.apply_spell_suggestion();
+                Ok(())
+            }
             _ => Ok(())
         }
     }
@@ -1071,6 +1305,11 @@ impl App {
         // Handle spell suggestion mode
         if self.show_spell_suggestions {
             return self.handle_spell_suggestions(key);
+        }
+        
+        // Handle grammar suggestion mode
+        if self.show_grammar_suggestions {
+            return self.handle_grammar_suggestions(key);
         }
 
         // Handle attachment input mode separately
@@ -1090,6 +1329,15 @@ impl App {
             }
             KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::ALT) => {
                 self.add_word_to_dictionary();
+                Ok(())
+            }
+            // Grammar checking shortcuts
+            KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::ALT) => {
+                self.toggle_grammar_check();
+                Ok(())
+            }
+            KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::ALT) => {
+                self.show_grammar_suggestions_at_cursor();
                 Ok(())
             }
             KeyCode::Esc => {

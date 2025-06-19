@@ -3,6 +3,7 @@ mod config;
 mod credentials;
 mod database;
 mod email;
+mod grammarcheck;
 mod spellcheck;
 mod ui;
 mod test_parsing;
