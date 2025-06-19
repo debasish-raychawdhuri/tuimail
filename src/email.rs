@@ -1202,7 +1202,14 @@ impl EmailClient {
         
         for (i, message) in messages.iter().enumerate() {
             if let Some(body) = message.body() {
-                let uid = message.uid.unwrap_or(0).to_string();
+                // Skip messages without valid UIDs
+                let uid = match message.uid {
+                    Some(uid) if uid > 0 => uid.to_string(),
+                    _ => {
+                        debug_log(&format!("Message {} has invalid UID ({:?}), skipping", i + 1, message.uid));
+                        continue;
+                    }
+                };
                 
                 let flags: Vec<String> = message
                     .flags()
@@ -1392,6 +1399,12 @@ impl EmailClient {
     pub fn mark_as_read(&self, email: &Email) -> Result<(), EmailError> {
         debug_log(&format!("Marking email as read: {} in folder {}", email.id, email.folder));
         
+        // Validate email ID before attempting STORE operation
+        if email.id.is_empty() || email.id == "0" {
+            debug_log(&format!("Invalid email ID '{}', skipping mark as read", email.id));
+            return Err(EmailError::ImapError("Invalid email ID for STORE operation".to_string()));
+        }
+        
         // Add retry logic for IMAP connection issues
         let mut attempts = 0;
         let max_attempts = 3;
@@ -1405,7 +1418,8 @@ impl EmailClient {
                         Ok(mut session) => {
                             match session.select(&email.folder) {
                                 Ok(_) => {
-                                    session.store(&email.id, "+FLAGS (\\Seen)")
+                                    debug_log(&format!("Attempting STORE command with UID: {}", email.id));
+                                    session.uid_store(&email.id, "+FLAGS (\\\\Seen)")
                                         .map_err(|e| EmailError::ImapError(e.to_string()))
                                 }
                                 Err(e) => Err(EmailError::ImapError(e.to_string()))
@@ -1419,7 +1433,8 @@ impl EmailClient {
                         Ok(mut session) => {
                             match session.select(&email.folder) {
                                 Ok(_) => {
-                                    session.store(&email.id, "+FLAGS (\\Seen)")
+                                    debug_log(&format!("Attempting STORE command with UID: {}", email.id));
+                                    session.uid_store(&email.id, "+FLAGS (\\\\Seen)")
                                         .map_err(|e| EmailError::ImapError(e.to_string()))
                                 }
                                 Err(e) => Err(EmailError::ImapError(e.to_string()))
@@ -1451,6 +1466,12 @@ impl EmailClient {
     
     #[allow(dead_code)]
     pub fn mark_as_unread(&self, email: &Email) -> Result<(), EmailError> {
+        // Validate email ID before attempting STORE operation
+        if email.id.is_empty() || email.id == "0" {
+            debug_log(&format!("Invalid email ID '{}', skipping mark as unread", email.id));
+            return Err(EmailError::ImapError("Invalid email ID for STORE operation".to_string()));
+        }
+        
         match self.account.imap_security {
             ImapSecurity::SSL | ImapSecurity::StartTLS => {
                 let mut session = self.connect_imap_secure()?;
@@ -1459,7 +1480,7 @@ impl EmailClient {
                     .map_err(|e| EmailError::ImapError(e.to_string()))?;
                 
                 session
-                    .store(&email.id, "-FLAGS (\\Seen)")
+                    .uid_store(&email.id, "-FLAGS (\\\\Seen)")
                     .map_err(|e| EmailError::ImapError(e.to_string()))?;
                 
                 Ok(())
@@ -1471,7 +1492,7 @@ impl EmailClient {
                     .map_err(|e| EmailError::ImapError(e.to_string()))?;
                 
                 session
-                    .store(&email.id, "-FLAGS (\\Seen)")
+                    .uid_store(&email.id, "-FLAGS (\\\\Seen)")
                     .map_err(|e| EmailError::ImapError(e.to_string()))?;
                 
                 Ok(())
@@ -1480,6 +1501,12 @@ impl EmailClient {
     }
     
     pub fn delete_email(&self, email: &Email) -> Result<(), EmailError> {
+        // Validate email ID before attempting STORE operation
+        if email.id.is_empty() || email.id == "0" {
+            debug_log(&format!("Invalid email ID '{}', skipping delete", email.id));
+            return Err(EmailError::ImapError("Invalid email ID for STORE operation".to_string()));
+        }
+        
         match self.account.imap_security {
             ImapSecurity::SSL | ImapSecurity::StartTLS => {
                 let mut session = self.connect_imap_secure()?;
@@ -1488,7 +1515,7 @@ impl EmailClient {
                     .map_err(|e| EmailError::ImapError(e.to_string()))?;
                 
                 session
-                    .store(&email.id, "+FLAGS (\\Deleted)")
+                    .uid_store(&email.id, "+FLAGS (\\\\Deleted)")
                     .map_err(|e| EmailError::ImapError(e.to_string()))?;
                 
                 session
@@ -1504,7 +1531,7 @@ impl EmailClient {
                     .map_err(|e| EmailError::ImapError(e.to_string()))?;
                 
                 session
-                    .store(&email.id, "+FLAGS (\\Deleted)")
+                    .uid_store(&email.id, "+FLAGS (\\\\Deleted)")
                     .map_err(|e| EmailError::ImapError(e.to_string()))?;
                 
                 session
@@ -1559,7 +1586,14 @@ impl EmailClient {
         for (i, message) in messages.iter().enumerate() {
             if let Some(body) = message.body() {
                 let flags: Vec<String> = message.flags().iter().map(|f| f.to_string()).collect();
-                let uid = message.uid.unwrap_or(0).to_string();
+                // Skip messages without valid UIDs
+                let uid = match message.uid {
+                    Some(uid) if uid > 0 => uid.to_string(),
+                    _ => {
+                        debug_log(&format!("Message {} has invalid UID ({:?}), skipping", i + 1, message.uid));
+                        continue;
+                    }
+                };
                 
                 debug_log(&format!("Processing new email {}: UID={}, size={} bytes, flags={:?}", 
                     i + 1, uid, body.len(), flags));
@@ -1615,7 +1649,14 @@ impl EmailClient {
         for (i, message) in messages.iter().enumerate() {
             if let Some(body) = message.body() {
                 let flags: Vec<String> = message.flags().iter().map(|f| f.to_string()).collect();
-                let uid = message.uid.unwrap_or(0).to_string();
+                // Skip messages without valid UIDs
+                let uid = match message.uid {
+                    Some(uid) if uid > 0 => uid.to_string(),
+                    _ => {
+                        debug_log(&format!("Message {} has invalid UID ({:?}), skipping", i + 1, message.uid));
+                        continue;
+                    }
+                };
                 
                 debug_log(&format!("Processing new email {}: UID={}, size={} bytes, flags={:?}", 
                     i + 1, uid, body.len(), flags));
