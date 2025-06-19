@@ -298,18 +298,30 @@ impl App {
             let config = crate::spellcheck::SpellCheckConfig::default();
             
             let text = match self.compose_field {
-                ComposeField::Subject => &self.compose_email.subject,
+                ComposeField::Subject => {
+                    log::debug!("Checking spelling for Subject: '{}'", self.compose_email.subject);
+                    &self.compose_email.subject
+                },
                 ComposeField::Body => {
                     if let Some(ref body) = self.compose_email.body_text {
+                        log::debug!("Checking spelling for Body: '{}'", body);
                         body
                     } else {
+                        log::debug!("Body is empty, no spell checking needed");
                         ""
                     }
                 }
-                ComposeField::To => return, // Don't spell check email addresses
+                ComposeField::To => {
+                    log::debug!("Skipping spell check for To field");
+                    return; // Don't spell check email addresses
+                }
             };
 
-            self.spell_errors = checker.check_text(text, &config);
+            let errors = checker.check_text(text, &config);
+            log::debug!("Spell check complete. Found {} errors", errors.len());
+            self.spell_errors = errors;
+        } else {
+            log::debug!("Spell checker not available");
         }
     }
 
@@ -927,6 +939,8 @@ impl App {
                 self.compose_field = ComposeField::To;
                 self.compose_cursor_pos = 0;
                 self.compose_to_text = String::new();
+                // Initialize spell checking for new compose
+                self.check_spelling();
                 Ok(())
             }
             KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -1090,6 +1104,8 @@ impl App {
                     ComposeField::Subject => self.compose_email.subject.len(), // End of Subject
                     ComposeField::Body => 0,                        // Beginning of Body for replies
                 };
+                // Trigger spell check when switching to a new field
+                self.check_spelling();
                 Ok(())
             }
             KeyCode::BackTab => {
@@ -1105,6 +1121,8 @@ impl App {
                     ComposeField::Subject => self.compose_email.subject.len(), // End of Subject
                     ComposeField::Body => 0,                        // Beginning of Body for replies
                 };
+                // Trigger spell check when switching to a new field
+                self.check_spelling();
                 Ok(())
             }
             KeyCode::Up => {
@@ -1195,10 +1213,8 @@ impl App {
                             self.compose_email.body_text = Some(c.to_string());
                             self.compose_cursor_pos = 1;
                         }
-                        // Trigger spell check for body (but only on word boundaries for performance)
-                        if c.is_whitespace() || c.is_ascii_punctuation() {
-                            self.check_spelling();
-                        }
+                        // Trigger spell check for body on any character (more responsive)
+                        self.check_spelling();
                     }
                 }
                 Ok(())
@@ -1235,14 +1251,11 @@ impl App {
                         if let Some(ref mut body) = self.compose_email.body_text {
                             if self.compose_cursor_pos > 0 && self.compose_cursor_pos <= body.len()
                             {
-                                let removed_char = body.chars().nth(self.compose_cursor_pos - 1).unwrap_or(' ');
                                 body.remove(self.compose_cursor_pos - 1);
                                 self.compose_cursor_pos -= 1;
                                 
-                                // Trigger spell check on word boundaries
-                                if removed_char.is_whitespace() || removed_char.is_ascii_punctuation() {
-                                    self.check_spelling();
-                                }
+                                // Trigger spell check after deletion
+                                self.check_spelling();
                             }
                         }
                     }

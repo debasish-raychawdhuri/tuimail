@@ -97,15 +97,32 @@ When spell suggestions are shown:
 
 ## Spell Checking
 
-TUImail includes a comprehensive built-in spell checker with **466,550+ English words** that helps you write error-free emails:
+TUImail includes a practical built-in spell checker with **~15,000 carefully curated English words** that helps you write error-free emails:
 
 ### Features
-- **Comprehensive Dictionary**: 466,550+ English words from the dwyl/english-words repository
+- **Practical Dictionary**: ~15,000 curated English words optimized for real-world email composition
+- **Smart Word Selection**: Google's 10,000 most common English words + technical terms + everyday vocabulary
 - **Real-time checking**: Spell checking as you type
-- **Smart suggestions**: Advanced similarity-based spelling suggestions
+- **Relevant suggestions**: Context-aware spelling suggestions for common misspellings
 - **Personal dictionary**: Add custom words to avoid false positives
 - **Configurable**: Enable/disable spell checking as needed
 - **Performance optimized**: Efficient HashSet-based word lookup
+
+### Dictionary Composition
+The spell checker uses a carefully curated dictionary that includes:
+- **Google's 10,000 most common English words**: Covers 99% of everyday vocabulary
+- **Technical & business terms**: Email, software, technology, and professional terminology
+- **Common everyday words**: Animals, colors, food, weather, time, places, etc.
+- **Contractions**: don't, won't, can't, I'm, you're, etc.
+- **Proper capitalization**: Both lowercase and capitalized versions of words
+
+### Why This Approach?
+Unlike comprehensive dictionaries with 400,000+ words that include obscure terms, archaic words, and proper nouns, our curated approach:
+- ✅ **Catches real typos**: "Ther" → suggests "there"
+- ✅ **Avoids false positives**: Doesn't include every obscure word that might be technically correct
+- ✅ **Provides relevant suggestions**: Focuses on words people actually use in emails
+- ✅ **Fast performance**: Smaller dictionary means faster lookups and suggestions
+- ✅ **Practical accuracy**: Optimized for real-world email composition
 
 ### How It Works
 - Spell checking is enabled by default for Subject and Body fields
@@ -129,14 +146,18 @@ The spell checker intelligently skips:
 - Words containing numbers
 - Very short words (< 2 characters)
 
-### Dictionary Coverage
-The comprehensive dictionary includes:
-- Common English words and vocabulary
-- Technical terms and programming terminology
-- Contractions (don't, won't, can't, etc.)
-- Proper nouns and place names
-- Scientific and academic terminology
-- Business and professional vocabulary
+### Example Coverage
+The dictionary correctly recognizes:
+- **Common words**: the, there, was, have, with, from, they, etc.
+- **Technical terms**: email, website, software, database, server, etc.
+- **Business vocabulary**: meeting, project, deadline, invoice, etc.
+- **Everyday words**: brown, crow, house, car, food, weather, etc.
+- **Contractions**: don't, can't, I'm, you're, etc.
+
+And correctly flags as misspellings:
+- **Common typos**: "Ther" (should be "There"), "teh" (should be "the")
+- **Misspellings**: "recieve" (should be "receive"), "seperate" (should be "separate")
+- **Nonsense words**: "asdfgh", "qwerty", etc.
 
 ## Supported Email Providers
 

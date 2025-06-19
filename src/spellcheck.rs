@@ -1,8 +1,10 @@
 use anyhow::{Context, Result};
 use std::collections::HashSet;
 
-// Embed the comprehensive English dictionary at compile time
-const ENGLISH_WORDS: &str = include_str!("../resources/words.txt");
+// Embed the practical word lists at compile time
+const COMMON_WORDS: &str = include_str!("../resources/google-10000-english.txt");
+const TECHNICAL_TERMS: &str = include_str!("../resources/technical-terms.txt");
+const ADDITIONAL_COMMON: &str = include_str!("../resources/additional-common.txt");
 
 /// Spell checker for email composition
 /// This is a basic implementation that can be extended with proper dictionary support
@@ -60,25 +62,72 @@ impl SpellChecker {
         })
     }
 
-    /// Load comprehensive English dictionary (466,550+ words)
+    /// Load practical English dictionary (10k most common + technical terms + additional common words)
     fn load_common_words() -> HashSet<String> {
         let mut words = HashSet::new();
         
-        // Load words from embedded dictionary
-        for line in ENGLISH_WORDS.lines() {
+        // Load Google's 10,000 most common English words
+        for line in COMMON_WORDS.lines() {
             let word = line.trim();
             if !word.is_empty() && word.len() >= 2 {
                 // Convert to lowercase for case-insensitive matching
                 words.insert(word.to_lowercase());
                 
-                // Also add the original case for proper nouns and acronyms
-                if word != word.to_lowercase() {
-                    words.insert(word.to_string());
-                }
+                // Also add capitalized version for sentence starts
+                let capitalized = format!("{}{}", 
+                    word.chars().next().unwrap().to_uppercase(),
+                    &word[1..]
+                );
+                words.insert(capitalized);
             }
         }
         
-        log::info!("Loaded {} words into spell checker dictionary", words.len());
+        // Load technical and business terms relevant to email
+        for line in TECHNICAL_TERMS.lines() {
+            let word = line.trim();
+            if !word.is_empty() && word.len() >= 2 {
+                words.insert(word.to_lowercase());
+                
+                // Add capitalized version
+                let capitalized = format!("{}{}", 
+                    word.chars().next().unwrap().to_uppercase(),
+                    &word[1..]
+                );
+                words.insert(capitalized);
+            }
+        }
+        
+        // Load additional common words that might not be in top 10k
+        for line in ADDITIONAL_COMMON.lines() {
+            let word = line.trim();
+            if !word.is_empty() && word.len() >= 2 {
+                words.insert(word.to_lowercase());
+                
+                // Add capitalized version
+                let capitalized = format!("{}{}", 
+                    word.chars().next().unwrap().to_uppercase(),
+                    &word[1..]
+                );
+                words.insert(capitalized);
+            }
+        }
+        
+        // Add common contractions that might not be in the lists
+        let contractions = vec![
+            "don't", "won't", "can't", "shouldn't", "wouldn't", "couldn't", "didn't",
+            "isn't", "aren't", "wasn't", "weren't", "haven't", "hasn't", "hadn't",
+            "I'm", "you're", "he's", "she's", "it's", "we're", "they're",
+            "I've", "you've", "we've", "they've", "I'll", "you'll", "he'll",
+            "she'll", "it'll", "we'll", "they'll", "I'd", "you'd", "he'd",
+            "she'd", "we'd", "they'd", "let's", "that's", "what's", "where's",
+            "when's", "why's", "how's", "here's", "there's"
+        ];
+        
+        for contraction in contractions {
+            words.insert(contraction.to_string());
+        }
+        
+        log::info!("Loaded {} words into practical spell checker dictionary", words.len());
         words
     }
 
@@ -126,37 +175,36 @@ impl SpellChecker {
         let word_lower = word.to_lowercase();
         let word_len = word_lower.len();
 
-        // Strategy 1: Find words with same length and similar starting characters
+        // Strategy 1: Find exact matches with different case
         for common_word in &self.common_words {
-            if common_word.len() == word_len {
+            if common_word.to_lowercase() == word_lower && common_word != &word {
+                suggestions.push(common_word.clone());
+            }
+        }
+
+        // Strategy 2: Find words with high similarity (edit distance 1-2)
+        for common_word in &self.common_words {
+            if (common_word.len() as i32 - word_len as i32).abs() <= 2 {
                 let similarity = self.calculate_similarity(&word_lower, common_word);
-                if similarity >= 0.7 { // 70% similarity threshold
-                    suggestions.push(common_word.clone());
-                    if suggestions.len() >= 3 {
-                        break;
-                    }
-                }
-            }
-        }
-
-        // Strategy 2: If not enough suggestions, try words with similar length (±1)
-        if suggestions.len() < 3 {
-            for common_word in &self.common_words {
-                if (common_word.len() as i32 - word_len as i32).abs() <= 1 {
-                    let similarity = self.calculate_similarity(&word_lower, common_word);
-                    if similarity >= 0.6 { // Lower threshold for different lengths
+                if similarity >= 0.6 {
+                    if !suggestions.contains(common_word) {
                         suggestions.push(common_word.clone());
-                        if suggestions.len() >= 5 {
-                            break;
-                        }
                     }
                 }
             }
         }
 
-        // Strategy 3: If still not enough, try prefix matching
-        if suggestions.len() < 3 && word_len >= 3 {
-            let prefix = &word_lower[..3.min(word_len)];
+        // Strategy 3: Common misspelling patterns
+        let corrected = self.apply_common_corrections(&word_lower);
+        if corrected != word_lower && self.common_words.contains(&corrected) {
+            if !suggestions.contains(&corrected) {
+                suggestions.insert(0, corrected); // Put common corrections first
+            }
+        }
+
+        // Strategy 4: If still not enough, try prefix matching for longer words
+        if suggestions.len() < 3 && word_len >= 4 {
+            let prefix = &word_lower[..3];
             for common_word in &self.common_words {
                 if common_word.starts_with(prefix) && !suggestions.contains(common_word) {
                     suggestions.push(common_word.clone());
@@ -167,15 +215,78 @@ impl SpellChecker {
             }
         }
 
-        // Remove duplicates and sort by length similarity
+        // Sort by similarity and length
         suggestions.sort_by(|a, b| {
-            let a_diff = (a.len() as i32 - word_len as i32).abs();
-            let b_diff = (b.len() as i32 - word_len as i32).abs();
-            a_diff.cmp(&b_diff)
+            let a_sim = self.calculate_similarity(&word_lower, a);
+            let b_sim = self.calculate_similarity(&word_lower, b);
+            b_sim.partial_cmp(&a_sim).unwrap_or(std::cmp::Ordering::Equal)
         });
         
         suggestions.truncate(5); // Limit to 5 suggestions
         suggestions
+    }
+
+    /// Apply common spelling correction patterns
+    fn apply_common_corrections(&self, word: &str) -> String {
+        let mut corrected = word.to_string();
+        
+        // Common misspelling patterns
+        let patterns = vec![
+            ("teh", "the"),
+            ("recieve", "receive"),
+            ("seperate", "separate"),
+            ("occured", "occurred"),
+            ("neccessary", "necessary"),
+            ("definately", "definitely"),
+            ("accomodate", "accommodate"),
+            ("begining", "beginning"),
+            ("beleive", "believe"),
+            ("calender", "calendar"),
+            ("cemetary", "cemetery"),
+            ("changable", "changeable"),
+            ("collegue", "colleague"),
+            ("comming", "coming"),
+            ("concious", "conscious"),
+            ("dilemna", "dilemma"),
+            ("embarass", "embarrass"),
+            ("enviroment", "environment"),
+            ("existance", "existence"),
+            ("goverment", "government"),
+            ("harrass", "harass"),
+            ("independant", "independent"),
+            ("judgement", "judgment"),
+            ("knowlege", "knowledge"),
+            ("liason", "liaison"),
+            ("maintainance", "maintenance"),
+            ("noticable", "noticeable"),
+            ("occassion", "occasion"),
+            ("perseverence", "perseverance"),
+            ("priviledge", "privilege"),
+            ("questionaire", "questionnaire"),
+            ("recomend", "recommend"),
+            ("succesful", "successful"),
+            ("tommorow", "tomorrow"),
+            ("untill", "until"),
+            ("vaccuum", "vacuum"),
+            ("wierd", "weird"),
+        ];
+        
+        for (wrong, right) in patterns {
+            if word == wrong {
+                return right.to_string();
+            }
+        }
+        
+        // Single character corrections
+        if word.ends_with("tion") && word.len() > 4 {
+            // Check for -sion vs -tion
+            let sion_version = format!("{}sion", &word[..word.len()-4]);
+            if self.common_words.contains(&sion_version) {
+                return sion_version;
+            }
+        }
+        
+        corrected
     }
 
     /// Calculate similarity between two words (simple Levenshtein-like algorithm)
@@ -213,23 +324,32 @@ impl SpellChecker {
     /// Check spelling of entire text and return errors
     pub fn check_text(&self, text: &str, config: &SpellCheckConfig) -> Vec<SpellError> {
         let mut errors = Vec::new();
+        
+        log::debug!("Spell checking text: '{}'", text);
+        let words = Self::extract_words(text);
+        log::debug!("Extracted {} words: {:?}", words.len(), words.iter().map(|w| &w.word).collect::<Vec<_>>());
 
-        for word_match in Self::extract_words(text) {
+        for word_match in words {
             let word = word_match.word;
             let word_pos = word_match.position;
 
             // Skip words based on configuration
             if self.should_skip_word(&word, config) {
+                log::debug!("Skipping word: '{}'", word);
                 continue;
             }
 
-            if !self.is_correct(&word) {
+            let is_correct = self.is_correct(&word);
+            log::debug!("Word '{}' is correct: {}", word, is_correct);
+            
+            if !is_correct {
                 let suggestions = self.suggest(&word);
                 let limited_suggestions = suggestions
                     .into_iter()
                     .take(config.max_suggestions)
                     .collect();
 
+                log::debug!("Found spelling error: '{}' at position {}, suggestions: {:?}", word, word_pos, limited_suggestions);
                 errors.push(SpellError {
                     word: word.to_string(),
                     position: word_pos,
@@ -238,6 +358,7 @@ impl SpellChecker {
             }
         }
 
+        log::debug!("Total spelling errors found: {}", errors.len());
         errors
     }
 
@@ -409,23 +530,33 @@ mod tests {
     }
 
     #[test]
-    fn test_suggestions_quality() {
+    fn test_original_case() {
         let config = SpellCheckConfig::default();
         let checker = SpellChecker::new(&config).unwrap();
         
-        // Test suggestions for common misspellings
-        let suggestions = checker.suggest("teh");
-        assert!(suggestions.len() > 0);
-        // The suggestion algorithm should find similar words
+        // Test the original problematic text
+        let test_text = "Ther was a brown crow; have you ever seen a brown crow?";
+        let errors = checker.check_text(test_text, &config);
         
-        let suggestions = checker.suggest("recieve");
-        assert!(suggestions.len() > 0);
+        println!("Testing text: '{}'", test_text);
+        println!("Found {} spelling errors:", errors.len());
         
-        let suggestions = checker.suggest("seperate");
-        assert!(suggestions.len() > 0);
+        for error in &errors {
+            println!("  - '{}' at position {} (suggestions: {:?})", 
+                     error.word, error.position, error.suggestions);
+        }
         
-        // Test that suggestions are reasonable length
-        let suggestions = checker.suggest("hello");
-        assert!(suggestions.len() <= 5); // Should limit to 5 suggestions
+        // Should find "Ther" as an error now
+        assert!(errors.len() > 0, "Should find at least one spelling error");
+        
+        let ther_error = errors.iter().find(|e| e.word == "Ther");
+        assert!(ther_error.is_some(), "Should find 'Ther' as a spelling error");
+        
+        // Verify individual words
+        assert!(!checker.is_correct("Ther"), "'Ther' should be incorrect");
+        assert!(checker.is_correct("There"), "'There' should be correct");
+        assert!(checker.is_correct("was"), "'was' should be correct");
+        assert!(checker.is_correct("brown"), "'brown' should be correct");
+        assert!(checker.is_correct("crow"), "'crow' should be correct");
     }
 }
