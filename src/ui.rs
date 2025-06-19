@@ -1159,17 +1159,15 @@ fn render_delete_confirm_mode(f: &mut Frame, app: &App, area: Rect) {
                 .title("Confirm Delete")
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::Red))
+                .style(Style::default().bg(Color::DarkGray))
         )
-        .alignment(Alignment::Center);
+        .alignment(Alignment::Center)
+        .style(Style::default().bg(Color::DarkGray));
     
     // Center the dialog on screen
     let dialog_area = centered_rect(50, 30, area);
     
-    // Clear the background for the dialog
-    let clear = Block::default().style(Style::default().bg(Color::Black));
-    f.render_widget(clear, dialog_area);
-    
-    // Render the dialog
+    // Render the dialog with solid background
     f.render_widget(dialog, dialog_area);
 }
 
