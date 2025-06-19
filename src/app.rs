@@ -1512,14 +1512,10 @@ impl App {
                     }
                     ComposeField::Body => {
                         if let Some(ref mut body) = self.compose_email.body_text {
-                            // Insert character at cursor position
-                            if self.compose_cursor_pos <= body.len() {
-                                body.insert(self.compose_cursor_pos, c);
-                                self.compose_cursor_pos += 1;
-                            } else {
-                                body.push(c);
-                                self.compose_cursor_pos = body.len();
-                            }
+                            // Ensure cursor position is valid and insert character
+                            let cursor_pos = self.compose_cursor_pos.min(body.len());
+                            body.insert(cursor_pos, c);
+                            self.compose_cursor_pos = cursor_pos + 1;
                         } else {
                             self.compose_email.body_text = Some(c.to_string());
                             self.compose_cursor_pos = 1;
@@ -1620,17 +1616,16 @@ impl App {
                 // In body field, add newline at cursor position
                 if self.compose_field == ComposeField::Body {
                     if let Some(ref mut body) = self.compose_email.body_text {
-                        if self.compose_cursor_pos <= body.len() {
-                            body.insert(self.compose_cursor_pos, '\n');
-                            self.compose_cursor_pos += 1;
-                        } else {
-                            body.push('\n');
-                            self.compose_cursor_pos = body.len();
-                        }
+                        // Ensure cursor position is valid
+                        let cursor_pos = self.compose_cursor_pos.min(body.len());
+                        body.insert(cursor_pos, '\n');
+                        self.compose_cursor_pos = cursor_pos + 1;
+                        
                         // Trigger spell and grammar check after newline
                         self.check_spelling();
                         self.check_grammar();
                     } else {
+                        // If body is None, create it with a newline
                         self.compose_email.body_text = Some("\n".to_string());
                         self.compose_cursor_pos = 1;
                         // Trigger spell and grammar check for new body
@@ -2034,10 +2029,12 @@ impl App {
 
             self.compose_email = reply;
             self.compose_to_text = to_text;
+            self.compose_cc_text = String::new(); // Clear CC field for reply
+            self.compose_bcc_text = String::new(); // Clear BCC field for reply
             self.mode = AppMode::Compose;
             self.focus = FocusPanel::ComposeForm;
             self.compose_field = ComposeField::Body;
-            self.compose_cursor_pos = 0; // Position cursor at the very beginning
+            self.compose_cursor_pos = 0; // Position cursor at the very beginning for user to start typing
 
             self.show_info("Replying to email - cursor positioned at top");
         } else {
@@ -2159,9 +2156,20 @@ impl App {
                 .map(|addr| addr.address.clone())
                 .collect::<Vec<_>>()
                 .join(", ");
+                
+            // Set CC text for reply-all before moving reply
+            let cc_text = reply
+                .cc
+                .iter()
+                .map(|addr| addr.address.clone())
+                .collect::<Vec<_>>()
+                .join(", ");
 
             self.compose_email = reply;
             self.compose_to_text = to_text;
+            self.compose_cc_text = cc_text;
+            self.compose_bcc_text = String::new(); // Clear BCC field for reply-all
+            
             self.mode = AppMode::Compose;
             self.focus = FocusPanel::ComposeForm;
             self.compose_field = ComposeField::Body;
