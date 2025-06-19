@@ -39,3 +39,9 @@ shellexpand = "3.1"
 
 # Secure password storage
 keyring = "2.3"
+
+# Grammar checking
+nlprule = "0.6.4"
+
+[build-dependencies]
+nlprule-build = "0.6.4"

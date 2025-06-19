@@ -74,6 +74,18 @@ impl GrammarChecker {
         // Get suggestions from nlprule
         let suggestions = self.rules.suggest(text, &self.tokenizer);
         
+        log::debug!("nlprule returned {} suggestions", suggestions.len());
+        for (i, suggestion) in suggestions.iter().enumerate() {
+            let span = suggestion.span().char();
+            log::debug!("  Suggestion {}: '{}' at pos {}-{}, replacements: {:?}", 
+                i + 1, 
+                suggestion.message(), 
+                span.start, 
+                span.end,
+                suggestion.replacements()
+            );
+        }
+        
         // Convert to our GrammarError format
         let errors: Vec<GrammarError> = suggestions
             .iter()
@@ -144,6 +156,51 @@ pub struct GrammarCheckStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_nlprule_detection() {
+        println!("Testing nlprule grammar detection...");
+        
+        let checker = GrammarChecker::new().unwrap();
+        let config = GrammarCheckConfig::default();
+        
+        // Test cases with obvious grammar errors
+        let test_cases = vec![
+            ("That cat is.", "incomplete sentence"),
+            ("Me are going", "subject-verb disagreement"),
+            ("I are happy", "subject-verb disagreement"), 
+            ("She don't like it", "subject-verb disagreement"),
+            ("He have a car", "subject-verb disagreement"),
+            ("This is a good sentence.", "correct sentence"),
+            ("The cats is sleeping", "subject-verb disagreement"),
+            ("I has a book", "subject-verb disagreement"),
+            ("We was there yesterday", "subject-verb disagreement"),
+        ];
+        
+        for (test_text, expected_error_type) in test_cases {
+            println!("\n--- Testing: \"{}\" (expecting: {}) ---", test_text, expected_error_type);
+            
+            // Check for grammar errors
+            let errors = checker.check_text(test_text, &config);
+            
+            if errors.is_empty() {
+                println!("✅ No grammar errors detected");
+            } else {
+                println!("❌ Grammar errors found ({} errors):", errors.len());
+                for (i, error) in errors.iter().enumerate() {
+                    println!("  {}. Error at position {}-{}: \"{}\"", 
+                        i + 1,
+                        error.start,
+                        error.end,
+                        error.message
+                    );
+                    if !error.replacements.is_empty() {
+                        println!("     Suggestions: [{}]", error.replacements.join(", "));
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn test_grammar_checker() {

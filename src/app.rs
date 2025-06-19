@@ -387,11 +387,6 @@ impl App {
             self.grammar_errors = errors;
         }
     }
-            self.spell_errors = errors;
-        } else {
-            log::debug!("Spell checker not available");
-        }
-    }
 
     /// Toggle spell checking on/off
     pub fn toggle_spell_check(&mut self) {
@@ -1139,8 +1134,9 @@ impl App {
                 self.compose_field = ComposeField::To;
                 self.compose_cursor_pos = 0;
                 self.compose_to_text = String::new();
-                // Initialize spell checking for new compose
+                // Initialize spell and grammar checking for new compose
                 self.check_spelling();
+                self.check_grammar();
                 Ok(())
             }
             KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -1288,16 +1284,6 @@ impl App {
                 Ok(())
             }
             _ => Ok(()),
-        }
-    }
-                }
-                Ok(())
-            }
-            KeyCode::Enter => {
-                self.apply_spell_suggestion();
-                Ok(())
-            }
-            _ => Ok(())
         }
     }
 
@@ -1452,8 +1438,9 @@ impl App {
                     }
                     ComposeField::Subject => {
                         self.compose_email.subject.push(c);
-                        // Trigger spell check for subject
+                        // Trigger spell and grammar check for subject
                         self.check_spelling();
+                        self.check_grammar();
                     }
                     ComposeField::Body => {
                         if let Some(ref mut body) = self.compose_email.body_text {
@@ -1469,8 +1456,9 @@ impl App {
                             self.compose_email.body_text = Some(c.to_string());
                             self.compose_cursor_pos = 1;
                         }
-                        // Trigger spell check for body on any character (more responsive)
+                        // Trigger spell and grammar check for body on any character (more responsive)
                         self.check_spelling();
+                        self.check_grammar();
                     }
                 }
                 Ok(())
@@ -1500,8 +1488,9 @@ impl App {
                     }
                     ComposeField::Subject => {
                         self.compose_email.subject.pop();
-                        // Trigger spell check for subject
+                        // Trigger spell and grammar check for subject
                         self.check_spelling();
+                        self.check_grammar();
                     }
                     ComposeField::Body => {
                         if let Some(ref mut body) = self.compose_email.body_text {
@@ -1510,8 +1499,9 @@ impl App {
                                 body.remove(self.compose_cursor_pos - 1);
                                 self.compose_cursor_pos -= 1;
                                 
-                                // Trigger spell check after deletion
+                                // Trigger spell and grammar check after deletion
                                 self.check_spelling();
+                                self.check_grammar();
                             }
                         }
                     }
@@ -1529,9 +1519,15 @@ impl App {
                             body.push('\n');
                             self.compose_cursor_pos = body.len();
                         }
+                        // Trigger spell and grammar check after newline
+                        self.check_spelling();
+                        self.check_grammar();
                     } else {
                         self.compose_email.body_text = Some("\n".to_string());
                         self.compose_cursor_pos = 1;
+                        // Trigger spell and grammar check for new body
+                        self.check_spelling();
+                        self.check_grammar();
                     }
                 }
                 Ok(())

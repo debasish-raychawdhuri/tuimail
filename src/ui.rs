@@ -346,6 +346,12 @@ fn render_compose_mode(f: &mut Frame, app: &App, area: Rect) {
         return;
     }
     
+    // If showing grammar suggestions, render the suggestion popup
+    if app.show_grammar_suggestions {
+        render_grammar_suggestions(f, app, area);
+        return;
+    }
+    
     // If in attachment input mode, show the input dialog
     if app.attachment_input_mode {
         render_attachment_input_dialog(f, app, area);
@@ -357,14 +363,14 @@ fn render_compose_mode(f: &mut Frame, app: &App, area: Rect) {
         vec![
             Constraint::Length(8), // Header fields
             Constraint::Min(0),    // Body
-            Constraint::Length(1), // Spell check status
+            Constraint::Length(2), // Status area (spell + grammar check)
         ]
     } else {
         vec![
             Constraint::Length(8), // Header fields
             Constraint::Length(4 + app.compose_email.attachments.len().min(3) as u16), // Attachments (max 3 visible)
             Constraint::Min(0),    // Body
-            Constraint::Length(1), // Spell check status
+            Constraint::Length(2), // Status area (spell + grammar check)
         ]
     };
     
@@ -409,9 +415,20 @@ fn render_compose_mode(f: &mut Frame, app: &App, area: Rect) {
             })
             .cloned()
             .collect();
+        // Filter grammar errors for subject field
+        let subject_grammar_errors: Vec<crate::grammarcheck::GrammarError> = app.grammar_errors
+            .iter()
+            .filter(|error| {
+                // Check if this grammar error is in the subject field
+                // For now, we'll assume grammar errors in subject are those with small positions
+                // This is a simplification - ideally we'd track which field each error belongs to
+                error.start < app.compose_email.subject.len()
+            })
+            .cloned()
+            .collect();
         
-        if !subject_errors.is_empty() {
-            create_highlighted_text(&app.compose_email.subject, &subject_errors, true, app.compose_cursor_pos)
+        if !subject_errors.is_empty() || !subject_grammar_errors.is_empty() {
+            create_highlighted_text(&app.compose_email.subject, &subject_errors, &subject_grammar_errors, true, app.compose_cursor_pos)
         } else if app.compose_field == crate::app::ComposeField::Subject {
             // Just add cursor without highlighting
             let cursor_pos = app.compose_cursor_pos.min(app.compose_email.subject.len());
@@ -493,10 +510,26 @@ fn render_compose_mode(f: &mut Frame, app: &App, area: Rect) {
     };
     
     // If we're in the body field, show cursor by inserting a cursor character
-    // and highlight misspelled words with red background
-    let body_content = if app.spell_check_enabled && !app.spell_errors.is_empty() {
-        // Create styled spans with misspelled words highlighted
-        let styled_content = create_highlighted_text(content, &app.spell_errors, app.compose_field == crate::app::ComposeField::Body, app.compose_cursor_pos);
+    // and highlight misspelled words and grammar errors
+    let body_content = if (app.spell_check_enabled && !app.spell_errors.is_empty()) || (app.grammar_check_enabled && !app.grammar_errors.is_empty()) {
+        // Filter grammar errors for body field (those beyond subject length)
+        let body_grammar_errors: Vec<crate::grammarcheck::GrammarError> = app.grammar_errors
+            .iter()
+            .filter(|error| {
+                // Grammar errors in body field would have positions beyond subject
+                error.start >= app.compose_email.subject.len()
+            })
+            .map(|error| {
+                // Adjust positions relative to body start
+                let mut adjusted_error = error.clone();
+                adjusted_error.start = adjusted_error.start.saturating_sub(app.compose_email.subject.len());
+                adjusted_error.end = adjusted_error.end.saturating_sub(app.compose_email.subject.len());
+                adjusted_error
+            })
+            .collect();
+            
+        // Create styled spans with misspelled words and grammar errors highlighted
+        let styled_content = create_highlighted_text(content, &app.spell_errors, &body_grammar_errors, app.compose_field == crate::app::ComposeField::Body, app.compose_cursor_pos);
         styled_content
     } else if app.compose_field == crate::app::ComposeField::Body {
         // Just add cursor without spell highlighting
@@ -533,30 +566,40 @@ fn render_compose_mode(f: &mut Frame, app: &App, area: Rect) {
     };
     
     if status_chunk_idx < chunks.len() {
-        render_spell_check_status(f, app, chunks[status_chunk_idx]);
+        render_check_status(f, app, chunks[status_chunk_idx]);
     }
 }
 
-fn render_spell_check_status(f: &mut Frame, app: &App, area: Rect) {
-    let status_text = if app.spell_check_enabled {
+fn render_check_status(f: &mut Frame, app: &App, area: Rect) {
+    // Split the status area into two parts: spell check and grammar check
+    let status_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // Spell check status
+            Constraint::Length(1), // Grammar check status
+        ])
+        .split(area);
+
+    // Render spell check status
+    let spell_status_text = if app.spell_check_enabled {
         if let Some(stats) = app.get_spell_stats() {
             if stats.misspelled_words > 0 {
                 format!(
-                    "Spell Check: {} errors | Alt+S: Toggle | Alt+G: Suggestions | Alt+D: Add to dict | Accuracy: {:.1}%",
+                    "Spell: {} errors | Alt+S: Toggle | Alt+G: Suggestions | Alt+D: Add to dict | Accuracy: {:.1}%",
                     stats.misspelled_words,
                     stats.accuracy
                 )
             } else {
-                "Spell Check: No errors | Alt+S: Toggle | Alt+G: Suggestions | Alt+D: Add to dict".to_string()
+                "Spell: No errors | Alt+S: Toggle | Alt+G: Suggestions | Alt+D: Add to dict".to_string()
             }
         } else {
-            "Spell Check: Enabled | Alt+S: Toggle | Alt+G: Suggestions | Alt+D: Add to dict".to_string()
+            "Spell: Enabled | Alt+S: Toggle | Alt+G: Suggestions | Alt+D: Add to dict".to_string()
         }
     } else {
-        "Spell Check: Disabled | Alt+S: Enable".to_string()
+        "Spell: Disabled | Alt+S: Enable".to_string()
     };
 
-    let status_color = if app.spell_check_enabled {
+    let spell_status_color = if app.spell_check_enabled {
         if app.spell_errors.is_empty() {
             Color::Green
         } else {
@@ -566,11 +609,46 @@ fn render_spell_check_status(f: &mut Frame, app: &App, area: Rect) {
         Color::Gray
     };
 
-    let status = Paragraph::new(status_text)
-        .style(Style::default().fg(status_color))
+    let spell_status = Paragraph::new(spell_status_text)
+        .style(Style::default().fg(spell_status_color))
         .alignment(Alignment::Left);
 
-    f.render_widget(status, area);
+    f.render_widget(spell_status, status_chunks[0]);
+
+    // Render grammar check status
+    let grammar_status_text = if app.grammar_check_enabled {
+        if let Some(stats) = app.get_grammar_stats() {
+            if stats.error_count > 0 {
+                format!(
+                    "Grammar: {} errors | Alt+R: Toggle | Alt+T: Suggestions | Quality: {:.1}%",
+                    stats.error_count,
+                    stats.quality_score
+                )
+            } else {
+                "Grammar: No errors | Alt+R: Toggle | Alt+T: Suggestions".to_string()
+            }
+        } else {
+            "Grammar: Enabled | Alt+R: Toggle | Alt+T: Suggestions".to_string()
+        }
+    } else {
+        "Grammar: Disabled | Alt+R: Enable".to_string()
+    };
+
+    let grammar_status_color = if app.grammar_check_enabled {
+        if app.grammar_errors.is_empty() {
+            Color::Green
+        } else {
+            Color::Blue
+        }
+    } else {
+        Color::Gray
+    };
+
+    let grammar_status = Paragraph::new(grammar_status_text)
+        .style(Style::default().fg(grammar_status_color))
+        .alignment(Alignment::Left);
+
+    f.render_widget(grammar_status, status_chunks[1]);
 }
 
 fn render_spell_suggestions(f: &mut Frame, app: &App, area: Rect) {
@@ -629,6 +707,92 @@ fn render_spell_suggestions(f: &mut Frame, app: &App, area: Rect) {
                 .style(Style::default().fg(Color::Gray))
                 .alignment(Alignment::Center);
             f.render_widget(help, help_area);
+        }
+    }
+}
+
+fn render_grammar_suggestions(f: &mut Frame, app: &App, area: Rect) {
+    // Find the current grammar error at cursor position
+    let mut current_error: Option<&crate::grammarcheck::GrammarError> = None;
+    for error in &app.grammar_errors {
+        if app.compose_cursor_pos >= error.start && app.compose_cursor_pos <= error.end {
+            current_error = Some(error);
+            break;
+        }
+    }
+
+    if let Some(error) = current_error {
+        // Create a popup in the center of the screen
+        let popup_area = centered_rect(60, 70, area);
+        
+        // Clear the background
+        let clear = Block::default().style(Style::default().bg(Color::Black));
+        f.render_widget(clear, area);
+
+        // Create suggestion items
+        let items: Vec<ListItem> = error.replacements
+            .iter()
+            .enumerate()
+            .map(|(i, suggestion)| {
+                let style = if i == app.selected_grammar_suggestion {
+                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::White)
+                };
+                ListItem::new(suggestion.as_str()).style(style)
+            })
+            .collect();
+
+        // Get the original text for the error
+        let original_text = match app.compose_field {
+            crate::app::ComposeField::Subject => {
+                if error.end <= app.compose_email.subject.len() {
+                    &app.compose_email.subject[error.start..error.end]
+                } else {
+                    "unknown"
+                }
+            },
+            crate::app::ComposeField::Body => {
+                if let Some(ref body) = app.compose_email.body_text {
+                    if error.end <= body.len() {
+                        &body[error.start..error.end]
+                    } else {
+                        "unknown"
+                    }
+                } else {
+                    "unknown"
+                }
+            },
+            _ => "unknown"
+        };
+
+        let suggestions_list = List::new(items)
+            .block(Block::default()
+                .title(format!("Grammar suggestions for '{}'", original_text))
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan)))
+            .highlight_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
+
+        f.render_widget(suggestions_list, popup_area);
+
+        // Add error message and help text at the bottom
+        let message_area = Rect {
+            x: popup_area.x,
+            y: popup_area.y + popup_area.height,
+            width: popup_area.width,
+            height: 2,
+        };
+
+        if message_area.y + 1 < area.height {
+            let message_text = format!("Error: {}", error.message);
+            let help_text = "↑↓: Navigate | Enter: Apply | Esc: Cancel";
+            
+            let message = Paragraph::new(vec![
+                Line::from(Span::styled(message_text, Style::default().fg(Color::Yellow))),
+                Line::from(Span::styled(help_text, Style::default().fg(Color::Gray))),
+            ])
+            .alignment(Alignment::Center);
+            f.render_widget(message, message_area);
         }
     }
 }
@@ -1002,37 +1166,122 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
         .split(popup_layout[1])[1]
 }
 
-/// Helper function to create text with highlighted misspelled words
-fn create_highlighted_text(text: &str, spell_errors: &[crate::spellcheck::SpellError], show_cursor: bool, cursor_pos: usize) -> ratatui::text::Text<'static> {
+/// Helper function to safely convert byte position to character position
+fn byte_to_char_pos(text: &str, byte_pos: usize) -> usize {
+    text.char_indices()
+        .position(|(i, _)| i >= byte_pos)
+        .unwrap_or(text.chars().count())
+}
+
+/// Helper function to safely slice text by character positions
+fn safe_char_slice(text: &str, start_char: usize, end_char: usize) -> String {
+    text.chars()
+        .skip(start_char)
+        .take(end_char.saturating_sub(start_char))
+        .collect()
+}
+
+/// Helper function to safely slice text from character position to end
+fn safe_char_slice_from(text: &str, start_char: usize) -> String {
+    text.chars()
+        .skip(start_char)
+        .collect()
+}
+
+/// Helper function to create text with highlighted misspelled words and grammar errors
+fn create_highlighted_text(text: &str, spell_errors: &[crate::spellcheck::SpellError], grammar_errors: &[crate::grammarcheck::GrammarError], show_cursor: bool, cursor_pos: usize) -> ratatui::text::Text<'static> {
     let mut spans = Vec::new();
     let mut last_pos = 0;
     
-    // Sort errors by position to process them in order
-    let mut sorted_errors = spell_errors.to_vec();
-    sorted_errors.sort_by_key(|e| e.position);
+    // Collect all errors with their types and positions
+    #[derive(Debug, Clone)]
+    enum ErrorType {
+        Spell(crate::spellcheck::SpellError),
+        Grammar(crate::grammarcheck::GrammarError),
+    }
+    
+    let mut all_errors = Vec::new();
+    
+    // Add spell errors
+    for error in spell_errors {
+        all_errors.push((error.position, ErrorType::Spell(error.clone())));
+    }
+    
+    // Add grammar errors
+    for error in grammar_errors {
+        all_errors.push((error.start, ErrorType::Grammar(error.clone())));
+    }
+    
+    // Sort all errors by position
+    all_errors.sort_by_key(|(pos, _)| *pos);
+    
+    // Convert text to character positions for safe processing
+    let text_len_chars = text.chars().count();
     
     // Process each error and create styled spans
-    for error in sorted_errors {
-        // Add normal text before the error
-        if error.position > last_pos {
-            let normal_text = text[last_pos..error.position].to_string();
-            spans.push(Span::raw(normal_text));
+    for (_, error) in all_errors {
+        match error {
+            ErrorType::Spell(spell_error) => {
+                // Convert byte positions to character positions
+                let error_start_char = byte_to_char_pos(text, spell_error.position);
+                let error_end_char = error_start_char + spell_error.word.chars().count();
+                
+                // Bounds checking
+                if error_start_char >= text_len_chars {
+                    continue;
+                }
+                
+                let error_end_char = error_end_char.min(text_len_chars);
+                
+                // Add normal text before the error
+                if error_start_char > last_pos {
+                    let normal_text = safe_char_slice(text, last_pos, error_start_char);
+                    spans.push(Span::raw(normal_text));
+                }
+                
+                // Add the misspelled word with red background
+                let error_text = safe_char_slice(text, error_start_char, error_end_char);
+                spans.push(Span::styled(
+                    error_text, 
+                    Style::default().bg(Color::Red).fg(Color::White)
+                ));
+                
+                last_pos = error_end_char;
+            }
+            ErrorType::Grammar(grammar_error) => {
+                // Convert byte positions to character positions
+                let error_start_char = byte_to_char_pos(text, grammar_error.start);
+                let error_end_char = byte_to_char_pos(text, grammar_error.end);
+                
+                // Bounds checking
+                if error_start_char >= text_len_chars {
+                    continue;
+                }
+                
+                let error_end_char = error_end_char.min(text_len_chars);
+                
+                // Add normal text before the error
+                if error_start_char > last_pos {
+                    let normal_text = safe_char_slice(text, last_pos, error_start_char);
+                    spans.push(Span::raw(normal_text));
+                }
+                
+                // Add the grammar error with blue underline
+                let error_text = safe_char_slice(text, error_start_char, error_end_char);
+                spans.push(Span::styled(
+                    error_text, 
+                    Style::default().bg(Color::Blue).fg(Color::White)
+                ));
+                
+                last_pos = error_end_char;
+            }
         }
-        
-        // Add the misspelled word with red background
-        let error_end = error.position + error.word.len();
-        let error_text = text[error.position..error_end].to_string();
-        spans.push(Span::styled(
-            error_text, 
-            Style::default().bg(Color::Red).fg(Color::White)
-        ));
-        
-        last_pos = error_end;
     }
     
     // Add remaining text after the last error
-    if last_pos < text.len() {
-        spans.push(Span::raw(text[last_pos..].to_string()));
+    if last_pos < text_len_chars {
+        let remaining_text = safe_char_slice_from(text, last_pos);
+        spans.push(Span::raw(remaining_text));
     }
     
     // If showing cursor, insert it at the cursor position
