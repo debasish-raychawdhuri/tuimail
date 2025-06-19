@@ -1,4 +1,5 @@
 mod app;
+mod async_grammar;
 mod config;
 mod credentials;
 mod database;
@@ -116,7 +117,8 @@ enum Commands {
     },
 }
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     // Check for test mode first
     let env_args: Vec<String> = std::env::args().collect();
     if env_args.len() > 1 && env_args[1] == "--test-parsing" {
@@ -366,7 +368,7 @@ fn main() -> Result<()> {
     }
     
     // Run the application
-    let result = run_app(&mut terminal, &mut app);
+    let result = run_app(&mut terminal, &mut app).await;
     
     // Restore terminal
     disable_raw_mode().context("Failed to disable raw mode")?;
@@ -442,7 +444,7 @@ fn migrate_passwords_if_needed(config: &mut Config, config_path: &str) -> Result
     Ok(())
 }
 
-fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> AppResult<()> {
+async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> AppResult<()> {
     // Initialize app with error handling
     if let Err(e) = app.init() {
         // Log the error to debug file if debug is enabled
@@ -529,6 +531,9 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> AppResult<(
                 }
             }
         }
+        
+        // Process any pending grammar check responses
+        app.process_grammar_responses().await;
         
         // Update app state with error handling
         if let Err(e) = app.tick() {

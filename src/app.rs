@@ -132,12 +132,13 @@ pub struct App {
     pub show_spell_suggestions: bool,
     pub selected_spell_suggestion: usize,
 
-    // Grammar checking
-    pub grammar_checker: Option<crate::grammarcheck::GrammarChecker>,
+    // Grammar checking (async)
+    pub async_grammar_checker: Option<crate::async_grammar::AsyncGrammarChecker>,
     pub grammar_errors: Vec<crate::grammarcheck::GrammarError>,
     pub grammar_check_enabled: bool,
     pub show_grammar_suggestions: bool,
     pub selected_grammar_suggestion: usize,
+    pub last_grammar_request_id: u64,
 
     // Attachment handling
     pub selected_attachment_idx: Option<usize>, // For viewing attachments in received emails
@@ -265,12 +266,13 @@ impl App {
             show_spell_suggestions: false,
             selected_spell_suggestion: 0,
             
-            // Initialize grammar checking
-            grammar_checker: Self::init_grammar_checker(),
+            // Initialize async grammar checking
+            async_grammar_checker: Self::init_async_grammar_checker(),
             grammar_errors: Vec::new(),
             grammar_check_enabled: true,
             show_grammar_suggestions: false,
             selected_grammar_suggestion: 0,
+            last_grammar_request_id: 0,
             
             selected_attachment_idx: None,
             attachment_input_mode: false,
@@ -309,15 +311,15 @@ impl App {
         }
     }
     
-    /// Initialize grammar checker
-    fn init_grammar_checker() -> Option<crate::grammarcheck::GrammarChecker> {
-        match crate::grammarcheck::GrammarChecker::new() {
+    /// Initialize async grammar checker
+    fn init_async_grammar_checker() -> Option<crate::async_grammar::AsyncGrammarChecker> {
+        match crate::async_grammar::AsyncGrammarChecker::new() {
             Ok(checker) => {
-                log::info!("Grammar checker initialized successfully");
+                log::info!("Async grammar checker initialized successfully");
                 Some(checker)
             }
             Err(e) => {
-                log::warn!("Failed to initialize grammar checker: {}", e);
+                log::warn!("Failed to initialize async grammar checker: {}", e);
                 None
             }
         }
@@ -359,28 +361,26 @@ impl App {
         }
     }
     
-    /// Check grammar of current compose field
-    pub fn check_grammar(&mut self) {
+    /// Request async grammar check of current compose field
+    pub fn request_grammar_check(&mut self) {
         if !self.grammar_check_enabled {
             self.grammar_errors.clear();
             return;
         }
 
-        if let Some(ref checker) = self.grammar_checker {
-            let config = crate::grammarcheck::GrammarCheckConfig::default();
-            
-            let text = match self.compose_field {
+        if let Some(ref checker) = self.async_grammar_checker {
+            let (text, field_type) = match self.compose_field {
                 ComposeField::Subject => {
-                    log::debug!("Checking grammar for Subject: '{}'", self.compose_email.subject);
-                    &self.compose_email.subject
+                    log::debug!("Requesting async grammar check for Subject: '{}'", self.compose_email.subject);
+                    (self.compose_email.subject.clone(), "Subject".to_string())
                 },
                 ComposeField::Body => {
                     if let Some(ref body) = self.compose_email.body_text {
-                        log::debug!("Checking grammar for Body: '{}'", body);
-                        body
+                        log::debug!("Requesting async grammar check for Body: '{}'", body);
+                        (body.clone(), "Body".to_string())
                     } else {
                         log::debug!("Body is empty, no grammar checking needed");
-                        ""
+                        return;
                     }
                 }
                 ComposeField::To | ComposeField::Cc | ComposeField::Bcc => {
@@ -389,9 +389,27 @@ impl App {
                 }
             };
 
-            let errors = checker.check_text(text, &config);
-            log::debug!("Grammar check complete. Found {} errors", errors.len());
-            self.grammar_errors = errors;
+            // Cancel any pending checks and request a new one
+            checker.cancel_pending();
+            self.last_grammar_request_id = checker.request_check(text, field_type);
+            log::debug!("Requested async grammar check with ID: {}", self.last_grammar_request_id);
+        }
+    }
+    
+    /// Process any pending grammar check responses
+    pub async fn process_grammar_responses(&mut self) {
+        if let Some(ref checker) = self.async_grammar_checker {
+            if let Some(response) = checker.try_receive_response().await {
+                // Only process if this is the most recent request
+                if response.request_id == self.last_grammar_request_id {
+                    log::debug!("Processing grammar check response for {} with {} errors", 
+                               response.field_type, response.errors.len());
+                    self.grammar_errors = response.errors;
+                } else {
+                    log::debug!("Ignoring outdated grammar check response (ID: {} vs current: {})", 
+                               response.request_id, self.last_grammar_request_id);
+                }
+            }
         }
     }
 
@@ -411,10 +429,13 @@ impl App {
     pub fn toggle_grammar_check(&mut self) {
         self.grammar_check_enabled = !self.grammar_check_enabled;
         if self.grammar_check_enabled {
-            self.check_grammar();
+            self.request_grammar_check();
             self.show_info("Grammar checking enabled");
         } else {
             self.grammar_errors.clear();
+            if let Some(ref checker) = self.async_grammar_checker {
+                checker.cancel_pending();
+            }
             self.show_info("Grammar checking disabled");
         }
     }
@@ -442,7 +463,7 @@ impl App {
     
     /// Show grammar suggestions for text at cursor
     pub fn show_grammar_suggestions_at_cursor(&mut self) {
-        if !self.grammar_check_enabled || self.grammar_checker.is_none() {
+        if !self.grammar_check_enabled || self.async_grammar_checker.is_none() {
             return;
         }
 
@@ -500,14 +521,14 @@ impl App {
             
             self.show_spell_suggestions = false;
             self.check_spelling(); // Recheck after replacement
-            self.check_grammar(); // Also recheck grammar
+            self.request_grammar_check(); // Also recheck grammar asynchronously
             self.show_info(&format!("Replaced '{}' with '{}'", original_word, suggestion));
         }
     }
     
     /// Apply selected grammar suggestion
     pub fn apply_grammar_suggestion(&mut self) {
-        if !self.show_grammar_suggestions || self.grammar_checker.is_none() {
+        if !self.show_grammar_suggestions || self.async_grammar_checker.is_none() {
             return;
         }
 
@@ -555,7 +576,7 @@ impl App {
             
             self.show_grammar_suggestions = false;
             self.check_spelling(); // Recheck spelling
-            self.check_grammar(); // Recheck grammar
+            self.request_grammar_check(); // Recheck grammar asynchronously
             self.show_info(&format!("Replaced '{}' with '{}'", original_text, suggestion));
         }
     }
@@ -1147,7 +1168,7 @@ impl App {
                 self.compose_bcc_text = String::new();
                 // Initialize spell and grammar checking for new compose
                 self.check_spelling();
-                self.check_grammar();
+                self.request_grammar_check();
                 Ok(())
             }
             KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -1511,7 +1532,7 @@ impl App {
                         self.compose_email.subject.push(c);
                         // Trigger spell and grammar check for subject
                         self.check_spelling();
-                        self.check_grammar();
+                        self.request_grammar_check();
                     }
                     ComposeField::Body => {
                         if let Some(ref mut body) = self.compose_email.body_text {
@@ -1525,7 +1546,7 @@ impl App {
                         }
                         // Trigger spell and grammar check for body on any character (more responsive)
                         self.check_spelling();
-                        self.check_grammar();
+                        self.request_grammar_check();
                     }
                 }
                 Ok(())
@@ -1597,7 +1618,7 @@ impl App {
                         self.compose_email.subject.pop();
                         // Trigger spell and grammar check for subject
                         self.check_spelling();
-                        self.check_grammar();
+                        self.request_grammar_check();
                     }
                     ComposeField::Body => {
                         if let Some(ref mut body) = self.compose_email.body_text {
@@ -1608,7 +1629,7 @@ impl App {
                                 
                                 // Trigger spell and grammar check after deletion
                                 self.check_spelling();
-                                self.check_grammar();
+                                self.request_grammar_check();
                             }
                         }
                     }
@@ -1626,14 +1647,14 @@ impl App {
                         
                         // Trigger spell and grammar check after newline
                         self.check_spelling();
-                        self.check_grammar();
+                        self.request_grammar_check();
                     } else {
                         // If body is None, create it with a newline
                         self.compose_email.body_text = Some("\n".to_string());
                         self.compose_cursor_pos = 1;
                         // Trigger spell and grammar check for new body
                         self.check_spelling();
-                        self.check_grammar();
+                        self.request_grammar_check();
                     }
                 }
                 Ok(())

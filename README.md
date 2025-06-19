@@ -10,6 +10,7 @@ A terminal-based email client built with Rust and Ratatui.
 - **Email Composition**: Compose and send emails with attachments
 - **Attachment Management**: Save and attach files with enhanced file browser
 - **Spell Checking**: Built-in spell checker for email composition with visual highlighting
+- **Async Grammar Checking**: Smart grammar checking that activates after 2 seconds of typing inactivity
 - **Secure Credentials**: Encrypted password storage using system keyring
 - **Folder Navigation**: Browse email folders and organize messages
 
@@ -90,7 +91,11 @@ Debug logs are written to `/tmp/tuimail_debug.log`.
 - `Alt+G`: Show spelling suggestions for word at cursor
 - `Alt+D`: Add word at cursor to personal dictionary
 
-When spell suggestions are shown:
+#### Grammar Checking in Compose Mode
+- `Alt+R`: Toggle grammar checking on/off
+- `Alt+T`: Show grammar suggestions for text at cursor
+
+When spell/grammar suggestions are shown:
 - `↑/↓`: Navigate suggestions
 - `Enter`: Apply selected suggestion
 - `Esc`: Cancel suggestions
@@ -159,6 +164,29 @@ And correctly flags as misspellings:
 - **Common typos**: "Ther" (should be "There"), "teh" (should be "the")
 - **Misspellings**: "recieve" (should be "receive"), "seperate" (should be "separate")
 - **Nonsense words**: "asdfgh", "qwerty", etc.
+
+## Async Grammar Checking
+
+TUImail includes smart asynchronous grammar checking that improves performance and user experience:
+
+### Key Features
+- **2-Second Delay**: Grammar checking only activates after 2 seconds of typing inactivity
+- **Non-blocking**: Runs in background without affecting typing performance
+- **Smart Cancellation**: New typing automatically cancels pending grammar checks
+- **Visual Highlighting**: Grammar errors are highlighted with blue background
+- **Contextual Suggestions**: Provides relevant grammar corrections
+
+### How It Works
+- Grammar checking is enabled by default for Subject and Body fields
+- When you stop typing, grammar analysis begins after a 2-second delay
+- Results appear as blue highlights for grammar errors
+- Use `Alt+T` to see suggestions for grammar errors at cursor position
+- Use `Alt+R` to toggle grammar checking on/off
+
+### Performance Benefits
+- **Smooth Typing**: No lag or delays while typing
+- **Reduced CPU Usage**: Grammar checks only when needed
+- **Better UX**: Responsive interface with intelligent background processing
 
 ## Supported Email Providers
 
