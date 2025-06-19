@@ -44,6 +44,7 @@ pub enum AppMode {
     FolderList,
     AccountSettings,
     Help,
+    DeleteConfirm,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1120,6 +1121,7 @@ impl App {
             AppMode::FolderList => self.handle_folder_list_mode(key),
             AppMode::AccountSettings => self.handle_settings_mode(key),
             AppMode::Help => self.handle_help_mode(key),
+            AppMode::DeleteConfirm => self.handle_delete_confirm_mode(key),
         }
     }
 
@@ -1223,7 +1225,7 @@ impl App {
                 Ok(())
             }
             KeyCode::Delete => {
-                self.delete_selected_email()?;
+                self.show_delete_confirmation();
                 Ok(())
             }
             _ => Ok(()),
@@ -1768,8 +1770,7 @@ impl App {
                 Ok(())
             }
             KeyCode::Char('d') => {
-                self.delete_selected_email()?;
-                self.mode = AppMode::Normal;
+                self.show_delete_confirmation();
                 Ok(())
             }
             KeyCode::Char('s') => {
@@ -1881,6 +1882,27 @@ impl App {
             }
             _ => Ok(()),
         }
+    }
+
+    fn handle_delete_confirm_mode(&mut self, key: KeyEvent) -> AppResult<()> {
+        match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                // User confirmed deletion
+                self.mode = AppMode::Normal;
+                self.delete_selected_email()?;
+                Ok(())
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                // User cancelled deletion
+                self.mode = AppMode::Normal;
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn show_delete_confirmation(&mut self) {
+        self.mode = AppMode::DeleteConfirm;
     }
 
     pub fn select_next_email(&mut self) {

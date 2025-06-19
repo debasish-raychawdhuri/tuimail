@@ -44,7 +44,7 @@ fn render_title_bar(f: &mut Frame, app: &App, area: Rect) {
         .block(Block::default().borders(Borders::BOTTOM))
         .highlight_style(Style::default().fg(Color::Yellow))
         .select(match app.mode {
-            AppMode::Normal | AppMode::ViewEmail | AppMode::FolderList => 0,
+            AppMode::Normal | AppMode::ViewEmail | AppMode::FolderList | AppMode::DeleteConfirm => 0,
             AppMode::Compose => 1,
             AppMode::AccountSettings => 2,
             AppMode::Help => 3,
@@ -66,6 +66,7 @@ fn render_main_content(f: &mut Frame, app: &App, area: Rect) {
         AppMode::FolderList => render_folder_list_mode(f, app, area),
         AppMode::AccountSettings => render_settings_mode(f, app, area),
         AppMode::Help => render_help_mode(f, app, area),
+        AppMode::DeleteConfirm => render_delete_confirm_mode(f, app, area),
     }
 }
 
@@ -1133,6 +1134,45 @@ fn render_help_mode(f: &mut Frame, _app: &App, area: Rect) {
     f.render_widget(help, centered_area);
 }
 
+fn render_delete_confirm_mode(f: &mut Frame, app: &App, area: Rect) {
+    // First render the normal mode in the background
+    render_normal_mode(f, app, area);
+    
+    // Create the confirmation dialog
+    let dialog_text = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("⚠️  Delete Email Confirmation", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD))
+        ]),
+        Line::from(""),
+        Line::from("Are you sure you want to delete this email?"),
+        Line::from("This action cannot be undone."),
+        Line::from(""),
+        Line::from("Press 'y' to confirm deletion"),
+        Line::from("Press 'n' or Esc to cancel"),
+        Line::from(""),
+    ];
+    
+    let dialog = Paragraph::new(dialog_text)
+        .block(
+            Block::default()
+                .title("Confirm Delete")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Red))
+        )
+        .alignment(Alignment::Center);
+    
+    // Center the dialog on screen
+    let dialog_area = centered_rect(50, 30, area);
+    
+    // Clear the background for the dialog
+    let clear = Block::default().style(Style::default().bg(Color::Black));
+    f.render_widget(clear, dialog_area);
+    
+    // Render the dialog
+    f.render_widget(dialog, dialog_area);
+}
+
 fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
     let mut text = String::new();
     
@@ -1172,6 +1212,7 @@ fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
         AppMode::FolderList => text.push_str("Use ↑↓ to navigate folders, Enter to select, Esc to cancel"),
         AppMode::Compose => text.push_str("Tab to switch fields, Ctrl+S to send, Esc to cancel"),
         AppMode::ViewEmail => text.push_str("r=Reply, a=Reply All, f=Forward, d=Delete, ↑↓=Scroll, Esc=Back"),
+        AppMode::DeleteConfirm => text.push_str("Delete email? Press 'y' to confirm, 'n' or Esc to cancel"),
         _ => text.push_str(&format!("Mode: {:?}", app.mode)),
     }
     
