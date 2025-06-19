@@ -22,6 +22,8 @@ pub type AppResult<T> = std::result::Result<T, AppError>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ComposeField {
     To,
+    Cc,
+    Bcc,
     Subject,
     Body,
 }
@@ -119,6 +121,8 @@ pub struct App {
     pub compose_field: ComposeField,
     pub compose_cursor_pos: usize, // Cursor position in the current field
     pub compose_to_text: String,   // Raw text for To field editing
+    pub compose_cc_text: String,   // Raw text for CC field editing
+    pub compose_bcc_text: String,  // Raw text for BCC field editing
 
     // Spell checking
     pub spell_checker: Option<crate::spellcheck::SpellChecker>,
@@ -250,6 +254,8 @@ impl App {
             compose_field: ComposeField::To,
             compose_cursor_pos: 0,
             compose_to_text: String::new(),
+            compose_cc_text: String::new(),
+            compose_bcc_text: String::new(),
             
             // Initialize spell checking
             spell_checker: Self::init_spell_checker(),
@@ -340,8 +346,8 @@ impl App {
                         ""
                     }
                 }
-                ComposeField::To => {
-                    log::debug!("Skipping spell check for To field");
+                ComposeField::To | ComposeField::Cc | ComposeField::Bcc => {
+                    log::debug!("Skipping spell check for email address fields");
                     return; // Don't spell check email addresses
                 }
             };
@@ -376,8 +382,8 @@ impl App {
                         ""
                     }
                 }
-                ComposeField::To => {
-                    log::debug!("Skipping grammar check for To field");
+                ComposeField::To | ComposeField::Cc | ComposeField::Bcc => {
+                    log::debug!("Skipping grammar check for email address fields");
                     return; // Don't grammar check email addresses
                 }
             };
@@ -488,7 +494,7 @@ impl App {
                         self.compose_cursor_pos = start_pos + suggestion.len();
                     }
                 }
-                ComposeField::To => {} // Don't spell check email addresses
+                ComposeField::To | ComposeField::Cc | ComposeField::Bcc => {} // Don't spell check email addresses
             }
             
             self.show_spell_suggestions = false;
@@ -520,7 +526,7 @@ impl App {
                                 continue;
                             }
                         }
-                        ComposeField::To => continue, // Don't grammar check email addresses
+                        ComposeField::To | ComposeField::Cc | ComposeField::Bcc => continue, // Don't grammar check email addresses
                     };
                     replacement_data = Some((error.start, error.end, original_text, suggestion));
                     break;
@@ -543,7 +549,7 @@ impl App {
                         self.compose_cursor_pos = start_pos + suggestion.len();
                     }
                 }
-                ComposeField::To => {} // Don't grammar check email addresses
+                ComposeField::To | ComposeField::Cc | ComposeField::Bcc => {} // Don't grammar check email addresses
             }
             
             self.show_grammar_suggestions = false;
@@ -597,7 +603,7 @@ impl App {
                     ""
                 }
             }
-            ComposeField::To => return None,
+            ComposeField::To | ComposeField::Cc | ComposeField::Bcc => return None,
         };
 
         // Count total words in the text
@@ -632,7 +638,7 @@ impl App {
                     ""
                 }
             }
-            ComposeField::To => return None,
+            ComposeField::To | ComposeField::Cc | ComposeField::Bcc => return None,
         };
 
         // Estimate sentence count (rough approximation)
@@ -1134,6 +1140,8 @@ impl App {
                 self.compose_field = ComposeField::To;
                 self.compose_cursor_pos = 0;
                 self.compose_to_text = String::new();
+                self.compose_cc_text = String::new();
+                self.compose_bcc_text = String::new();
                 // Initialize spell and grammar checking for new compose
                 self.check_spelling();
                 self.check_grammar();
@@ -1336,13 +1344,17 @@ impl App {
             KeyCode::Tab => {
                 // Move to next field
                 self.compose_field = match self.compose_field {
-                    ComposeField::To => ComposeField::Subject,
+                    ComposeField::To => ComposeField::Cc,
+                    ComposeField::Cc => ComposeField::Bcc,
+                    ComposeField::Bcc => ComposeField::Subject,
                     ComposeField::Subject => ComposeField::Body,
                     ComposeField::Body => ComposeField::To,
                 };
                 // Reset cursor position when switching fields
                 self.compose_cursor_pos = match self.compose_field {
                     ComposeField::To => self.compose_to_text.len(), // End of To field
+                    ComposeField::Cc => self.compose_cc_text.len(), // End of CC field
+                    ComposeField::Bcc => self.compose_bcc_text.len(), // End of BCC field
                     ComposeField::Subject => self.compose_email.subject.len(), // End of Subject
                     ComposeField::Body => 0,                        // Beginning of Body for replies
                 };
@@ -1354,12 +1366,16 @@ impl App {
                 // Move to previous field
                 self.compose_field = match self.compose_field {
                     ComposeField::To => ComposeField::Body,
-                    ComposeField::Subject => ComposeField::To,
+                    ComposeField::Cc => ComposeField::To,
+                    ComposeField::Bcc => ComposeField::Cc,
+                    ComposeField::Subject => ComposeField::Bcc,
                     ComposeField::Body => ComposeField::Subject,
                 };
                 // Reset cursor position when switching fields
                 self.compose_cursor_pos = match self.compose_field {
                     ComposeField::To => self.compose_to_text.len(), // End of To field
+                    ComposeField::Cc => self.compose_cc_text.len(), // End of CC field
+                    ComposeField::Bcc => self.compose_bcc_text.len(), // End of BCC field
                     ComposeField::Subject => self.compose_email.subject.len(), // End of Subject
                     ComposeField::Body => 0,                        // Beginning of Body for replies
                 };
@@ -1371,12 +1387,16 @@ impl App {
                 // Move to previous field
                 self.compose_field = match self.compose_field {
                     ComposeField::To => ComposeField::Body,
-                    ComposeField::Subject => ComposeField::To,
+                    ComposeField::Cc => ComposeField::To,
+                    ComposeField::Bcc => ComposeField::Cc,
+                    ComposeField::Subject => ComposeField::Bcc,
                     ComposeField::Body => ComposeField::Subject,
                 };
                 // Reset cursor position when switching fields
                 self.compose_cursor_pos = match self.compose_field {
                     ComposeField::To => self.compose_to_text.len(), // End of To field
+                    ComposeField::Cc => self.compose_cc_text.len(), // End of CC field
+                    ComposeField::Bcc => self.compose_bcc_text.len(), // End of BCC field
                     ComposeField::Subject => self.compose_email.subject.len(), // End of Subject
                     ComposeField::Body => 0,                        // Beginning of Body for replies
                 };
@@ -1385,13 +1405,17 @@ impl App {
             KeyCode::Down => {
                 // Move to next field
                 self.compose_field = match self.compose_field {
-                    ComposeField::To => ComposeField::Subject,
+                    ComposeField::To => ComposeField::Cc,
+                    ComposeField::Cc => ComposeField::Bcc,
+                    ComposeField::Bcc => ComposeField::Subject,
                     ComposeField::Subject => ComposeField::Body,
                     ComposeField::Body => ComposeField::To,
                 };
                 // Reset cursor position when switching fields
                 self.compose_cursor_pos = match self.compose_field {
                     ComposeField::To => self.compose_to_text.len(), // End of To field
+                    ComposeField::Cc => self.compose_cc_text.len(), // End of CC field
+                    ComposeField::Bcc => self.compose_bcc_text.len(), // End of BCC field
                     ComposeField::Subject => self.compose_email.subject.len(), // End of Subject
                     ComposeField::Body => 0,                        // Beginning of Body for replies
                 };
@@ -1430,6 +1454,50 @@ impl App {
                             let addr = addr.trim();
                             if !addr.is_empty() {
                                 self.compose_email.to.push(crate::email::EmailAddress {
+                                    name: None,
+                                    address: addr.to_string(),
+                                });
+                            }
+                        }
+                    }
+                    ComposeField::Cc => {
+                        // Insert character at cursor position in CC field
+                        if self.compose_cursor_pos <= self.compose_cc_text.len() {
+                            self.compose_cc_text.insert(self.compose_cursor_pos, c);
+                            self.compose_cursor_pos += 1;
+                        } else {
+                            self.compose_cc_text.push(c);
+                            self.compose_cursor_pos = self.compose_cc_text.len();
+                        }
+
+                        // Parse the cc field and update compose_email.cc
+                        self.compose_email.cc.clear();
+                        for addr in self.compose_cc_text.split(',') {
+                            let addr = addr.trim();
+                            if !addr.is_empty() {
+                                self.compose_email.cc.push(crate::email::EmailAddress {
+                                    name: None,
+                                    address: addr.to_string(),
+                                });
+                            }
+                        }
+                    }
+                    ComposeField::Bcc => {
+                        // Insert character at cursor position in BCC field
+                        if self.compose_cursor_pos <= self.compose_bcc_text.len() {
+                            self.compose_bcc_text.insert(self.compose_cursor_pos, c);
+                            self.compose_cursor_pos += 1;
+                        } else {
+                            self.compose_bcc_text.push(c);
+                            self.compose_cursor_pos = self.compose_bcc_text.len();
+                        }
+
+                        // Parse the bcc field and update compose_email.bcc
+                        self.compose_email.bcc.clear();
+                        for addr in self.compose_bcc_text.split(',') {
+                            let addr = addr.trim();
+                            if !addr.is_empty() {
+                                self.compose_email.bcc.push(crate::email::EmailAddress {
                                     name: None,
                                     address: addr.to_string(),
                                 });
@@ -1479,6 +1547,46 @@ impl App {
                                 let addr = addr.trim();
                                 if !addr.is_empty() {
                                     self.compose_email.to.push(crate::email::EmailAddress {
+                                        name: None,
+                                        address: addr.to_string(),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                    ComposeField::Cc => {
+                        if self.compose_cursor_pos > 0
+                            && self.compose_cursor_pos <= self.compose_cc_text.len()
+                        {
+                            self.compose_cc_text.remove(self.compose_cursor_pos - 1);
+                            self.compose_cursor_pos -= 1;
+
+                            // Parse the cc field and update compose_email.cc
+                            self.compose_email.cc.clear();
+                            for addr in self.compose_cc_text.split(',') {
+                                let addr = addr.trim();
+                                if !addr.is_empty() {
+                                    self.compose_email.cc.push(crate::email::EmailAddress {
+                                        name: None,
+                                        address: addr.to_string(),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                    ComposeField::Bcc => {
+                        if self.compose_cursor_pos > 0
+                            && self.compose_cursor_pos <= self.compose_bcc_text.len()
+                        {
+                            self.compose_bcc_text.remove(self.compose_cursor_pos - 1);
+                            self.compose_cursor_pos -= 1;
+
+                            // Parse the bcc field and update compose_email.bcc
+                            self.compose_email.bcc.clear();
+                            for addr in self.compose_bcc_text.split(',') {
+                                let addr = addr.trim();
+                                if !addr.is_empty() {
+                                    self.compose_email.bcc.push(crate::email::EmailAddress {
                                         name: None,
                                         address: addr.to_string(),
                                     });
@@ -1540,6 +1648,16 @@ impl App {
                             self.compose_cursor_pos -= 1;
                         }
                     }
+                    ComposeField::Cc => {
+                        if self.compose_cursor_pos > 0 {
+                            self.compose_cursor_pos -= 1;
+                        }
+                    }
+                    ComposeField::Bcc => {
+                        if self.compose_cursor_pos > 0 {
+                            self.compose_cursor_pos -= 1;
+                        }
+                    }
                     ComposeField::Body => {
                         if self.compose_cursor_pos > 0 {
                             self.compose_cursor_pos -= 1;
@@ -1554,6 +1672,16 @@ impl App {
                 match self.compose_field {
                     ComposeField::To => {
                         if self.compose_cursor_pos < self.compose_to_text.len() {
+                            self.compose_cursor_pos += 1;
+                        }
+                    }
+                    ComposeField::Cc => {
+                        if self.compose_cursor_pos < self.compose_cc_text.len() {
+                            self.compose_cursor_pos += 1;
+                        }
+                    }
+                    ComposeField::Bcc => {
+                        if self.compose_cursor_pos < self.compose_bcc_text.len() {
                             self.compose_cursor_pos += 1;
                         }
                     }
@@ -2976,6 +3104,8 @@ impl App {
                         // Clear the compose form
                         self.compose_email = crate::email::Email::new();
                         self.compose_to_text.clear();
+                        self.compose_cc_text.clear();
+                        self.compose_bcc_text.clear();
 
                         self.mode = AppMode::Normal;
                         self.focus = FocusPanel::EmailList;

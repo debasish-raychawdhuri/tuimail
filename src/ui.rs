@@ -361,16 +361,16 @@ fn render_compose_mode(f: &mut Frame, app: &App, area: Rect) {
     // Determine layout based on whether there are attachments
     let constraints = if app.compose_email.attachments.is_empty() {
         vec![
-            Constraint::Length(8), // Header fields
-            Constraint::Min(0),    // Body
-            Constraint::Length(2), // Status area (spell + grammar check)
+            Constraint::Length(12), // Header fields (To, CC, BCC, Subject)
+            Constraint::Min(0),     // Body
+            Constraint::Length(2),  // Status area (spell + grammar check)
         ]
     } else {
         vec![
-            Constraint::Length(8), // Header fields
+            Constraint::Length(12), // Header fields (To, CC, BCC, Subject)
             Constraint::Length(4 + app.compose_email.attachments.len().min(3) as u16), // Attachments (max 3 visible)
-            Constraint::Min(0),    // Body
-            Constraint::Length(2), // Status area (spell + grammar check)
+            Constraint::Min(0),     // Body
+            Constraint::Length(2),  // Status area (spell + grammar check)
         ]
     };
     
@@ -392,7 +392,43 @@ fn render_compose_mode(f: &mut Frame, app: &App, area: Rect) {
         app.compose_to_text.clone()
     };
     
+    let cc_display = if app.compose_field == crate::app::ComposeField::Cc {
+        // Show cursor in CC field when active
+        let cursor_pos = app.compose_cursor_pos.min(app.compose_cc_text.len());
+        let mut display_text = app.compose_cc_text.clone();
+        if cursor_pos <= display_text.len() {
+            display_text.insert(cursor_pos, '│'); // Vertical bar as cursor
+        }
+        display_text
+    } else {
+        app.compose_cc_text.clone()
+    };
+    
+    let bcc_display = if app.compose_field == crate::app::ComposeField::Bcc {
+        // Show cursor in BCC field when active
+        let cursor_pos = app.compose_cursor_pos.min(app.compose_bcc_text.len());
+        let mut display_text = app.compose_bcc_text.clone();
+        if cursor_pos <= display_text.len() {
+            display_text.insert(cursor_pos, '│'); // Vertical bar as cursor
+        }
+        display_text
+    } else {
+        app.compose_bcc_text.clone()
+    };
+    
     let to_style = if app.compose_field == crate::app::ComposeField::To {
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Gray)
+    };
+    
+    let cc_style = if app.compose_field == crate::app::ComposeField::Cc {
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Gray)
+    };
+    
+    let bcc_style = if app.compose_field == crate::app::ComposeField::Bcc {
         Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(Color::Gray)
@@ -458,7 +494,14 @@ fn render_compose_mode(f: &mut Frame, app: &App, area: Rect) {
             Span::styled("To: ", to_style),
             Span::raw(&to_display),
         ]),
-        Line::from(""),
+        Line::from(vec![
+            Span::styled("CC: ", cc_style),
+            Span::raw(&cc_display),
+        ]),
+        Line::from(vec![
+            Span::styled("BCC: ", bcc_style),
+            Span::raw(&bcc_display),
+        ]),
         Line::from(vec![
             Span::styled("Subject: ", subject_style),
         ]),
@@ -477,7 +520,7 @@ fn render_compose_mode(f: &mut Frame, app: &App, area: Rect) {
     if app.spell_check_enabled && app.compose_field == crate::app::ComposeField::Subject {
         let subject_area = Rect {
             x: chunks[0].x + 10, // Offset to align with "Subject: " text
-            y: chunks[0].y + 4,  // Position after the "Subject: " line
+            y: chunks[0].y + 6,  // Position after the "Subject: " line (adjusted for CC/BCC)
             width: chunks[0].width - 12,
             height: 1,
         };
