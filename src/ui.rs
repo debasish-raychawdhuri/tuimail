@@ -578,18 +578,10 @@ fn render_compose_mode(f: &mut Frame, app: &App, area: Rect) {
     } else if app.compose_field == crate::app::ComposeField::Body {
         // Just add cursor without spell highlighting
         let cursor_pos = app.compose_cursor_pos.min(content.len());
-        let mut display_text = content.to_string();
-        
-        // Insert cursor character at the cursor position
-        if cursor_pos <= display_text.len() {
-            display_text.insert(cursor_pos, '│'); // Vertical bar as cursor
-        }
-        
-        // Convert to Text for rendering
-        Line::from(display_text).into()
+        create_text_with_cursor(content, cursor_pos)
     } else {
         // Plain text without cursor
-        Line::from(content.to_string()).into()
+        create_text_without_cursor(content)
     };
     
     let body = Paragraph::new(body_content)
@@ -1282,8 +1274,10 @@ fn safe_char_slice_from(text: &str, start_char: usize) -> String {
 
 /// Helper function to create text with highlighted misspelled words and grammar errors
 fn create_highlighted_text(text: &str, spell_errors: &[crate::spellcheck::SpellError], grammar_errors: &[crate::grammarcheck::GrammarError], show_cursor: bool, cursor_pos: usize) -> ratatui::text::Text<'static> {
-    let mut spans = Vec::new();
-    let mut last_pos = 0;
+    // Split text into lines first to preserve newlines
+    let lines: Vec<&str> = text.split('\n').collect();
+    let mut result_lines = Vec::new();
+    let mut char_offset = 0;
     
     // Collect all errors with their types and positions
     #[derive(Debug, Clone)]
@@ -1307,113 +1301,169 @@ fn create_highlighted_text(text: &str, spell_errors: &[crate::spellcheck::SpellE
     // Sort all errors by position
     all_errors.sort_by_key(|(pos, _)| *pos);
     
-    // Convert text to character positions for safe processing
-    let text_len_chars = text.chars().count();
-    
-    // Process each error and create styled spans
-    for (_, error) in all_errors {
-        match error {
-            ErrorType::Spell(spell_error) => {
-                // Convert byte positions to character positions
-                let error_start_char = byte_to_char_pos(text, spell_error.position);
-                let error_end_char = error_start_char + spell_error.word.chars().count();
-                
-                // Bounds checking
-                if error_start_char >= text_len_chars {
-                    continue;
+    // Process each line separately
+    for (line_idx, line_text) in lines.iter().enumerate() {
+        let line_start_char = char_offset;
+        let line_end_char = char_offset + line_text.chars().count();
+        
+        let mut spans = Vec::new();
+        let mut last_pos = 0;
+        
+        // Find errors that fall within this line
+        for (_, error) in &all_errors {
+            let (error_start_char, error_end_char, error_style) = match error {
+                ErrorType::Spell(spell_error) => {
+                    let start = byte_to_char_pos(text, spell_error.position);
+                    let end = start + spell_error.word.chars().count();
+                    (start, end, Style::default().bg(Color::Red).fg(Color::White))
                 }
-                
-                let error_end_char = error_end_char.min(text_len_chars);
+                ErrorType::Grammar(grammar_error) => {
+                    let start = byte_to_char_pos(text, grammar_error.start);
+                    let end = byte_to_char_pos(text, grammar_error.end);
+                    (start, end, Style::default().bg(Color::Blue).fg(Color::White))
+                }
+            };
+            
+            // Check if error overlaps with current line
+            if error_start_char < line_end_char && error_end_char > line_start_char {
+                // Calculate relative positions within the line
+                let line_error_start = if error_start_char > line_start_char {
+                    error_start_char - line_start_char
+                } else {
+                    0
+                };
+                let line_error_end = if error_end_char < line_end_char {
+                    error_end_char - line_start_char
+                } else {
+                    line_text.chars().count()
+                };
                 
                 // Add normal text before the error
-                if error_start_char > last_pos {
-                    let normal_text = safe_char_slice(text, last_pos, error_start_char);
+                if line_error_start > last_pos {
+                    let normal_text = safe_char_slice(line_text, last_pos, line_error_start);
                     spans.push(Span::raw(normal_text));
                 }
                 
-                // Add the misspelled word with red background
-                let error_text = safe_char_slice(text, error_start_char, error_end_char);
-                spans.push(Span::styled(
-                    error_text, 
-                    Style::default().bg(Color::Red).fg(Color::White)
-                ));
+                // Add the error text with styling
+                let error_text = safe_char_slice(line_text, line_error_start, line_error_end);
+                spans.push(Span::styled(error_text, error_style));
                 
-                last_pos = error_end_char;
-            }
-            ErrorType::Grammar(grammar_error) => {
-                // Convert byte positions to character positions
-                let error_start_char = byte_to_char_pos(text, grammar_error.start);
-                let error_end_char = byte_to_char_pos(text, grammar_error.end);
-                
-                // Bounds checking
-                if error_start_char >= text_len_chars {
-                    continue;
-                }
-                
-                let error_end_char = error_end_char.min(text_len_chars);
-                
-                // Add normal text before the error
-                if error_start_char > last_pos {
-                    let normal_text = safe_char_slice(text, last_pos, error_start_char);
-                    spans.push(Span::raw(normal_text));
-                }
-                
-                // Add the grammar error with blue underline
-                let error_text = safe_char_slice(text, error_start_char, error_end_char);
-                spans.push(Span::styled(
-                    error_text, 
-                    Style::default().bg(Color::Blue).fg(Color::White)
-                ));
-                
-                last_pos = error_end_char;
+                last_pos = line_error_end;
             }
         }
-    }
-    
-    // Add remaining text after the last error
-    if last_pos < text_len_chars {
-        let remaining_text = safe_char_slice_from(text, last_pos);
-        spans.push(Span::raw(remaining_text));
-    }
-    
-    // If showing cursor, insert it at the cursor position
-    if show_cursor {
-        let mut final_spans = Vec::new();
-        let mut cursor_inserted = false;
         
-        for span in spans {
-            if !cursor_inserted && span.content.len() + final_spans.iter().map(|s: &Span| s.content.len()).sum::<usize>() >= cursor_pos {
-                // Need to split this span to insert cursor
-                let span_start = cursor_pos - final_spans.iter().map(|s: &Span| s.content.len()).sum::<usize>();
+        // Add remaining text after the last error in this line
+        if last_pos < line_text.chars().count() {
+            let remaining_text = safe_char_slice_from(line_text, last_pos);
+            spans.push(Span::raw(remaining_text));
+        }
+        
+        // If this line is empty, add an empty span to preserve the line
+        if spans.is_empty() {
+            spans.push(Span::raw(""));
+        }
+        
+        // Handle cursor insertion if it's on this line
+        if show_cursor && cursor_pos >= line_start_char && cursor_pos <= line_end_char {
+            let cursor_pos_in_line = cursor_pos - line_start_char;
+            let mut final_spans = Vec::new();
+            let mut cursor_inserted = false;
+            let mut current_pos = 0;
+            
+            for span in spans {
+                let span_len = span.content.chars().count();
                 
-                if span_start > 0 {
-                    // Add text before cursor
-                    let before_cursor = span.content.chars().take(span_start).collect::<String>();
-                    final_spans.push(Span::styled(before_cursor, span.style));
+                if !cursor_inserted && current_pos + span_len >= cursor_pos_in_line {
+                    // Need to split this span to insert cursor
+                    let split_pos = cursor_pos_in_line - current_pos;
+                    
+                    if split_pos > 0 {
+                        // Add text before cursor
+                        let before_cursor = span.content.chars().take(split_pos).collect::<String>();
+                        final_spans.push(Span::styled(before_cursor, span.style));
+                    }
+                    
+                    // Add cursor
+                    final_spans.push(Span::styled("│".to_string(), Style::default().fg(Color::Yellow)));
+                    
+                    // Add text after cursor
+                    let after_cursor = span.content.chars().skip(split_pos).collect::<String>();
+                    if !after_cursor.is_empty() {
+                        final_spans.push(Span::styled(after_cursor, span.style));
+                    }
+                    
+                    cursor_inserted = true;
+                } else {
+                    final_spans.push(span);
                 }
                 
-                // Add cursor
+                current_pos += span_len;
+            }
+            
+            // If cursor wasn't inserted yet and it's at the end of this line, add it
+            if !cursor_inserted && cursor_pos_in_line == current_pos {
                 final_spans.push(Span::styled("│".to_string(), Style::default().fg(Color::Yellow)));
-                
-                // Add text after cursor
-                let after_cursor = span.content.chars().skip(span_start).collect::<String>();
-                if !after_cursor.is_empty() {
-                    final_spans.push(Span::styled(after_cursor, span.style));
-                }
-                
-                cursor_inserted = true;
-            } else {
-                final_spans.push(span);
             }
+            
+            result_lines.push(Line::from(final_spans));
+        } else {
+            result_lines.push(Line::from(spans));
         }
         
-        // If cursor wasn't inserted yet, add it at the end
-        if !cursor_inserted {
-            final_spans.push(Span::styled("│".to_string(), Style::default().fg(Color::Yellow)));
-        }
-        
-        ratatui::text::Text::from(Line::from(final_spans))
-    } else {
-        ratatui::text::Text::from(Line::from(spans))
+        // Update character offset for next line (add 1 for the newline character)
+        char_offset = line_end_char + 1;
     }
+    
+    ratatui::text::Text::from(result_lines)
+}
+
+/// Helper function to create text with cursor, preserving newlines
+fn create_text_with_cursor(text: &str, cursor_pos: usize) -> ratatui::text::Text<'static> {
+    let lines: Vec<&str> = text.split('\n').collect();
+    let mut result_lines = Vec::new();
+    let mut char_offset = 0;
+    
+    for line_text in lines.iter() {
+        let line_start_char = char_offset;
+        let line_end_char = char_offset + line_text.chars().count();
+        
+        // Check if cursor is on this line
+        if cursor_pos >= line_start_char && cursor_pos <= line_end_char {
+            let cursor_pos_in_line = cursor_pos - line_start_char;
+            
+            // Split the line at cursor position
+            let before_cursor: String = line_text.chars().take(cursor_pos_in_line).collect();
+            let after_cursor: String = line_text.chars().skip(cursor_pos_in_line).collect();
+            
+            // Create spans with cursor
+            let mut spans = Vec::new();
+            if !before_cursor.is_empty() {
+                spans.push(Span::raw(before_cursor));
+            }
+            spans.push(Span::styled("│".to_string(), Style::default().fg(Color::Yellow)));
+            if !after_cursor.is_empty() {
+                spans.push(Span::raw(after_cursor));
+            }
+            
+            result_lines.push(Line::from(spans));
+        } else {
+            // Regular line without cursor
+            result_lines.push(Line::from(line_text.to_string()));
+        }
+        
+        // Update character offset for next line (add 1 for the newline character)
+        char_offset = line_end_char + 1;
+    }
+    
+    ratatui::text::Text::from(result_lines)
+}
+
+/// Helper function to create text without cursor, preserving newlines
+fn create_text_without_cursor(text: &str) -> ratatui::text::Text<'static> {
+    let lines: Vec<&str> = text.split('\n').collect();
+    let result_lines: Vec<Line> = lines.iter()
+        .map(|line| Line::from(line.to_string()))
+        .collect();
+    
+    ratatui::text::Text::from(result_lines)
 }
