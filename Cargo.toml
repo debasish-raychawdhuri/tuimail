@@ -43,5 +43,9 @@ keyring = "2.3"
 # Grammar checking
 nlprule = "0.6.4"
 
+# Unix system calls (for daemon mode)
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [build-dependencies]
 nlprule-build = "0.6.4"

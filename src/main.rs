@@ -349,8 +349,19 @@ async fn main() -> Result<()> {
     // Clear the terminal to ensure clean start
     terminal.clear().context("Failed to clear terminal")?;
     
+    // Create database
+    let cache_dir = dirs::cache_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("tuimail");
+    std::fs::create_dir_all(&cache_dir).context("Failed to create cache directory")?;
+    let db_path = cache_dir.join("emails.db");
+    let database = std::sync::Arc::new(
+        crate::database::EmailDatabase::new(&db_path)
+            .context("Failed to initialize database")?
+    );
+    
     // Create app state
-    let mut app = App::new(config);
+    let mut app = App::new(config, database);
     
     // Debug logging
     if std::env::var("EMAIL_DEBUG").is_ok() {
@@ -485,9 +496,34 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> AppRe
     let mut consecutive_errors = 0;
     const MAX_CONSECUTIVE_ERRORS: u32 = 10;
     
+    // Add database polling timer
+    let mut last_db_poll = std::time::Instant::now();
+    const DB_POLL_INTERVAL: Duration = Duration::from_secs(2); // Poll database every 2 seconds
+    
     loop {
-        // Check for new emails from background fetcher
+        // Check for new emails from background fetcher (legacy)
         app.check_for_new_emails();
+        
+        // Poll database for changes periodically
+        if last_db_poll.elapsed() >= DB_POLL_INTERVAL {
+            if let Err(e) = app.refresh_emails_from_database() {
+                // Log error but don't fail the UI
+                if std::env::var("EMAIL_DEBUG").is_ok() {
+                    let log_file = "/tmp/tuimail_debug.log";
+                    if let Ok(mut file) = std::fs::OpenOptions::new()
+                        .create(true)
+                        .write(true)
+                        .append(true)
+                        .open(log_file) 
+                    {
+                        use std::io::Write;
+                        let _ = writeln!(file, "[{}] Database poll error: {}", 
+                            Local::now().format("%Y-%m-%d %H:%M:%S"), e);
+                    }
+                }
+            }
+            last_db_poll = std::time::Instant::now();
+        }
         
         // Draw UI
         if let Err(e) = terminal.draw(|frame| ui(frame, app)) {
@@ -524,7 +560,8 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> AppRe
                     
                     // Check if we should exit
                     if app.should_quit {
-                        // Stop background email fetching before exiting
+                        // Cleanup is already called in the quit handler
+                        // Stop legacy background email fetching before exiting
                         app.stop_background_email_fetching();
                         return Ok(());
                     }

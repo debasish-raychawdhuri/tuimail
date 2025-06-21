@@ -1747,12 +1747,13 @@ impl EmailClient {
             match self.fetch_new_emails_since_count(folder, last_known_count) {
                 Ok(missed_emails) => {
                     if !missed_emails.is_empty() {
-                        debug_log(&format!("Sending {} missed emails to UI", missed_emails.len()));
-                        if let Err(e) = tx.send(missed_emails) {
-                            debug_log(&format!("Failed to send missed emails to UI: {}", e));
-                        } else {
-                            debug_log("Successfully sent missed emails to UI");
-                        }
+                        debug_log(&format!("Found {} missed emails", missed_emails.len()));
+                        // TODO: In new architecture, this would be handled by sync daemon
+                        // if let Err(e) = database.save_emails(&self.account.email, folder, &missed_emails) {
+                        //     debug_log(&format!("Failed to save missed emails to database: {}", e));
+                        // } else {
+                        //     debug_log("Successfully saved missed emails to database");
+                        // }
                     }
                 }
                 Err(e) => {
@@ -1791,17 +1792,17 @@ impl EmailClient {
     pub fn run_idle_session(
         &self,
         folder: &str,
-        tx: &mpsc::Sender<Vec<Email>>,
+        database: &crate::database::EmailDatabase,
         running: &Arc<Mutex<bool>>,
     ) -> Result<(), EmailError> {
         debug_log(&format!("Starting IDLE session for folder: {}", folder));
         
         match self.account.imap_security {
             ImapSecurity::SSL | ImapSecurity::StartTLS => {
-                self.run_idle_session_secure(folder, tx, running)
+                self.run_idle_session_secure(folder, database, running)
             }
             ImapSecurity::None => {
-                self.run_idle_session_plain(folder, tx, running)
+                self.run_idle_session_plain(folder, database, running)
             }
         }
     }
@@ -1809,7 +1810,7 @@ impl EmailClient {
     fn run_idle_session_secure(
         &self,
         folder: &str,
-        tx: &mpsc::Sender<Vec<Email>>,
+        database: &crate::database::EmailDatabase,
         running: &Arc<Mutex<bool>>,
     ) -> Result<(), EmailError> {
         let mut reconnect_attempts = 0;
@@ -1826,7 +1827,7 @@ impl EmailClient {
                 }
             }
             
-            match self.run_single_idle_session_secure_with_count(folder, tx, running, &mut last_known_count) {
+            match self.run_single_idle_session_secure_with_count(folder, database, running, &mut last_known_count) {
                 Ok(_) => {
                     debug_log("IDLE session completed normally");
                     return Ok(());
@@ -1854,7 +1855,7 @@ impl EmailClient {
     fn run_single_idle_session_secure_with_count(
         &self,
         folder: &str,
-        tx: &mpsc::Sender<Vec<Email>>,
+        database: &crate::database::EmailDatabase,
         running: &Arc<Mutex<bool>>,
         last_known_count: &mut usize,
     ) -> Result<(), EmailError> {
@@ -1876,7 +1877,8 @@ impl EmailClient {
         debug_log("IDLE session: Server supports IDLE, starting suspend/resume resilient IDLE loop");
         
         // Sync any missed emails from previous disconnection and update count
-        *last_known_count = self.sync_emails_after_reconnection(folder, *last_known_count, tx)?;
+        // TODO: In new architecture, this is handled by sync daemon
+        // *last_known_count = self.sync_emails_after_reconnection(folder, *last_known_count, tx)?;
         debug_log(&format!("IDLE session: message count after reconnection sync: {}", last_known_count));
         
         // Main IDLE loop with shorter timeouts for better suspend/resume handling
@@ -1932,12 +1934,11 @@ impl EmailClient {
                         match self.fetch_new_emails_since_count(folder, *last_known_count) {
                             Ok(new_emails) => {
                                 if !new_emails.is_empty() {
-                                    debug_log(&format!("IDLE session: fetched {} new emails", new_emails.len()));
-                                    if let Err(e) = tx.send(new_emails) {
-                                        debug_log(&format!("IDLE session: email channel closed: {}", e));
-                                        return Ok(());
+                                    debug_log(&format!("IDLE session: saving {} new emails to database", new_emails.len()));
+                                    if let Err(e) = database.save_emails(&self.account.email, folder, &new_emails) {
+                                        debug_log(&format!("IDLE session: failed to save emails to database: {}", e));
                                     } else {
-                                        debug_log("IDLE session: new emails sent to UI");
+                                        debug_log("IDLE session: new emails saved to database");
                                     }
                                 }
                             }
@@ -1978,7 +1979,7 @@ impl EmailClient {
     fn run_idle_session_plain(
         &self,
         folder: &str,
-        tx: &mpsc::Sender<Vec<Email>>,
+        database: &crate::database::EmailDatabase,
         running: &Arc<Mutex<bool>>,
     ) -> Result<(), EmailError> {
         let mut reconnect_attempts = 0;
@@ -1995,7 +1996,7 @@ impl EmailClient {
                 }
             }
             
-            match self.run_single_idle_session_plain_with_count(folder, tx, running, &mut last_known_count) {
+            match self.run_single_idle_session_plain_with_count(folder, database, running, &mut last_known_count) {
                 Ok(_) => {
                     debug_log("IDLE session (plain) completed normally");
                     return Ok(());
@@ -2023,7 +2024,7 @@ impl EmailClient {
     fn run_single_idle_session_plain_with_count(
         &self,
         folder: &str,
-        tx: &mpsc::Sender<Vec<Email>>,
+        database: &crate::database::EmailDatabase,
         running: &Arc<Mutex<bool>>,
         last_known_count: &mut usize,
     ) -> Result<(), EmailError> {
@@ -2045,7 +2046,8 @@ impl EmailClient {
         debug_log("IDLE session (plain): Server supports IDLE, starting suspend/resume resilient IDLE loop");
         
         // Sync any missed emails from previous disconnection and update count
-        *last_known_count = self.sync_emails_after_reconnection(folder, *last_known_count, tx)?;
+        // TODO: In new architecture, this is handled by sync daemon
+        // *last_known_count = self.sync_emails_after_reconnection(folder, *last_known_count, tx)?;
         debug_log(&format!("IDLE session (plain): message count after reconnection sync: {}", last_known_count));
         
         // Main IDLE loop with shorter timeouts for better suspend/resume handling
@@ -2101,12 +2103,11 @@ impl EmailClient {
                         match self.fetch_new_emails_since_count(folder, *last_known_count) {
                             Ok(new_emails) => {
                                 if !new_emails.is_empty() {
-                                    debug_log(&format!("IDLE session (plain): fetched {} new emails", new_emails.len()));
-                                    if let Err(e) = tx.send(new_emails) {
-                                        debug_log(&format!("IDLE session (plain): email channel closed: {}", e));
-                                        return Ok(());
+                                    debug_log(&format!("IDLE session (plain): saving {} new emails to database", new_emails.len()));
+                                    if let Err(e) = database.save_emails(&self.account.email, folder, &new_emails) {
+                                        debug_log(&format!("IDLE session (plain): failed to save emails to database: {}", e));
                                     } else {
-                                        debug_log("IDLE session (plain): new emails sent to UI");
+                                        debug_log("IDLE session (plain): new emails saved to database");
                                     }
                                 }
                             }

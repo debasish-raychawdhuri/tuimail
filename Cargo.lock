@@ -3140,6 +3140,7 @@ dependencies = [
  "imap",
  "keyring",
  "lettre",
+ "libc",
  "log",
  "mail-parser",
  "native-tls",
