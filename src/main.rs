@@ -501,11 +501,11 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> AppRe
     const DB_POLL_INTERVAL: Duration = Duration::from_secs(2); // Poll database every 2 seconds
     
     loop {
-        // Check for new emails from background fetcher (legacy)
-        app.check_for_new_emails();
-        
         // Poll database for changes periodically
         if last_db_poll.elapsed() >= DB_POLL_INTERVAL {
+            // Check for new emails from background fetcher (legacy)
+            app.check_for_new_emails();
+            
             if let Err(e) = app.refresh_emails_from_database() {
                 // Log error but don't fail the UI
                 if std::env::var("EMAIL_DEBUG").is_ok() {

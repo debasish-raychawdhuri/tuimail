@@ -109,6 +109,13 @@ impl EmailDatabase {
             [],
         )?;
 
+        // Simple index on timestamp for efficient MAX() queries
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_emails_timestamp 
+             ON emails(date_received DESC)",
+            [],
+        )?;
+
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_attachments_email 
              ON attachments(account_email, folder, email_uid)",
@@ -565,6 +572,142 @@ impl EmailDatabase {
         Ok(emails)
     }
 
+    /// Get recent emails with a limit for better performance
+    /// Get the timestamp of the most recent email - much faster than loading emails
+    pub fn get_latest_email_timestamp(&self, account_email: &str, folder: &str) -> Result<Option<i64>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT MAX(date_received) FROM emails WHERE account_email = ?1 AND folder = ?2"
+        )?;
+        
+        let timestamp = stmt.query_row(params![account_email, folder], |row| {
+            row.get::<_, Option<i64>>(0)
+        })?;
+        
+        Ok(timestamp)
+    }
+
+    pub fn get_recent_emails(&self, account_email: &str, folder: &str, limit: usize) -> Result<Vec<Email>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT uid, message_id, subject, from_addresses, to_addresses, 
+                    cc_addresses, bcc_addresses, date_received, body_text, body_html,
+                    flags, headers, seen
+             FROM emails 
+             WHERE account_email = ?1 AND folder = ?2 
+             ORDER BY date_received DESC
+             LIMIT ?3",
+        )?;
+
+        let email_rows = stmt.query_map(params![account_email, folder, limit], |row| {
+            Ok((
+                row.get::<_, u32>(0)?,       // uid
+                row.get::<_, Option<String>>(1)?, // message_id
+                row.get::<_, String>(2)?,    // subject
+                row.get::<_, String>(3)?,    // from_addresses
+                row.get::<_, String>(4)?,    // to_addresses
+                row.get::<_, String>(5)?,    // cc_addresses
+                row.get::<_, String>(6)?,    // bcc_addresses
+                row.get::<_, i64>(7)?,       // date_received
+                row.get::<_, Option<String>>(8)?, // body_text
+                row.get::<_, Option<String>>(9)?, // body_html
+                row.get::<_, String>(10)?,   // flags
+                row.get::<_, String>(11)?,   // headers
+                row.get::<_, bool>(12)?,     // seen
+            ))
+        })?;
+
+        // First, collect all email UIDs and basic data
+        let mut email_data = Vec::new();
+        for row_result in email_rows {
+            let (uid, _message_id, subject, from_str, to_str, cc_str, bcc_str, date_received, 
+                 body_text, body_html, flags_str, headers_str, seen) = row_result?;
+            email_data.push((uid, subject, from_str, to_str, cc_str, bcc_str, date_received, 
+                           body_text, body_html, flags_str, headers_str, seen));
+        }
+        
+        // Load ALL attachments for these emails in one query (much faster!)
+        let uids: Vec<String> = email_data.iter().map(|(uid, ..)| uid.to_string()).collect();
+        let uid_placeholders = uids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        
+        let attachment_query = format!(
+            "SELECT email_uid, filename, content_type, data FROM attachments 
+             WHERE account_email = ? AND folder = ? AND email_uid IN ({})",
+            uid_placeholders
+        );
+        
+        let mut attachment_stmt = self.conn.prepare(&attachment_query)?;
+        let mut params = vec![account_email.to_string(), folder.to_string()];
+        params.extend(uids);
+        
+        let attachment_rows = attachment_stmt.query_map(
+            rusqlite::params_from_iter(params.iter()),
+            |row| {
+                Ok((
+                    row.get::<_, u32>(0)?,  // email_uid
+                    crate::email::EmailAttachment {
+                        filename: row.get(1)?,
+                        content_type: row.get(2)?,
+                        data: row.get(3)?,
+                    }
+                ))
+            }
+        )?;
+
+        // Group attachments by email UID
+        let mut attachments_by_uid: std::collections::HashMap<u32, Vec<crate::email::EmailAttachment>> = 
+            std::collections::HashMap::new();
+        
+        for attachment_result in attachment_rows {
+            let (email_uid, attachment) = attachment_result?;
+            attachments_by_uid.entry(email_uid).or_insert_with(Vec::new).push(attachment);
+        }
+        
+        // Now build the final email objects
+        let mut emails = Vec::new();
+        
+        for (uid, subject, from_str, to_str, cc_str, bcc_str, date_received, 
+             body_text, body_html, flags_str, headers_str, seen) in email_data {
+            
+            // Parse addresses
+            let from_addresses: Vec<crate::email::EmailAddress> = serde_json::from_str(&from_str).unwrap_or_default();
+            let to_addresses: Vec<crate::email::EmailAddress> = serde_json::from_str(&to_str).unwrap_or_default();
+            let cc_addresses: Vec<crate::email::EmailAddress> = serde_json::from_str(&cc_str).unwrap_or_default();
+            let bcc_addresses: Vec<crate::email::EmailAddress> = serde_json::from_str(&bcc_str).unwrap_or_default();
+
+            // Parse flags
+            let flags: Vec<String> = serde_json::from_str(&flags_str).unwrap_or_default();
+
+            // Parse headers
+            let headers: std::collections::HashMap<String, String> = 
+                serde_json::from_str(&headers_str).unwrap_or_default();
+
+            // Get attachments for this email (already loaded)
+            let attachments = attachments_by_uid.remove(&uid).unwrap_or_default();
+
+            let email = Email {
+                id: uid.to_string(),
+                subject,
+                from: from_addresses,
+                to: to_addresses,
+                cc: cc_addresses,
+                bcc: bcc_addresses,
+                date: DateTime::from_timestamp(date_received, 0)
+                    .unwrap_or_else(|| DateTime::from_timestamp(0, 0).unwrap())
+                    .with_timezone(&Local),
+                body_text,
+                body_html,
+                attachments,
+                flags,
+                headers,
+                seen,
+                folder: folder.to_string(),
+            };
+
+            emails.push(email);
+        }
+
+        Ok(emails)
+    }
+
     pub fn update_email_seen_status(&self, account_email: &str, folder: &str, uid: u32, seen: bool) -> Result<()> {
         self.conn.execute(
             "UPDATE emails SET seen = ?1, updated_at = strftime('%s', 'now') 
@@ -615,5 +758,23 @@ impl EmailDatabase {
         )?;
         
         Ok(())
+    }
+    
+    /// Get the highest UID for a specific account and folder (for new mail checking)
+    pub fn get_last_uid(&self, account_email: &str, folder: &str) -> Result<u32> {
+        let result = self.conn.query_row(
+            "SELECT MAX(CAST(uid AS INTEGER)) FROM emails WHERE account_email = ?1 AND folder = ?2",
+            params![account_email, folder],
+            |row| {
+                let uid: Option<i64> = row.get(0)?;
+                Ok(uid.unwrap_or(0) as u32)
+            }
+        );
+        
+        match result {
+            Ok(uid) => Ok(uid),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(0),
+            Err(e) => Err(e.into()),
+        }
     }
 }

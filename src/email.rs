@@ -2198,6 +2198,170 @@ impl EmailClient {
             }
         }
     }
+    
+    /// Get the latest UID from the server (lightweight check for new mail)
+    pub fn get_latest_uid(&self, folder: &str) -> Result<u32, EmailError> {
+        debug_log(&format!("get_latest_uid called for folder: {}", folder));
+        
+        match self.account.imap_security {
+            ImapSecurity::SSL | ImapSecurity::StartTLS => {
+                let mut session = self.connect_imap_secure()?;
+
+                // Select folder
+                session.select(folder)
+                    .map_err(|e| EmailError::ImapError(format!("Failed to select folder {}: {}", folder, e)))?;
+
+                // Get the highest UID using SEARCH
+                let search_result = session.search("ALL")
+                    .map_err(|e| EmailError::ImapError(format!("Failed to search emails: {}", e)))?;
+
+                let latest_uid = if search_result.is_empty() {
+                    0
+                } else {
+                    *search_result.iter().max().unwrap_or(&0)
+                };
+
+                debug_log(&format!("Latest UID for folder {}: {}", folder, latest_uid));
+
+                // Logout
+                let _ = session.logout();
+
+                Ok(latest_uid)
+            }
+            ImapSecurity::None => {
+                let mut session = self.connect_imap_plain()?;
+
+                // Select folder
+                session.select(folder)
+                    .map_err(|e| EmailError::ImapError(format!("Failed to select folder {}: {}", folder, e)))?;
+
+                // Get the highest UID using SEARCH
+                let search_result = session.search("ALL")
+                    .map_err(|e| EmailError::ImapError(format!("Failed to search emails: {}", e)))?;
+
+                let latest_uid = if search_result.is_empty() {
+                    0
+                } else {
+                    *search_result.iter().max().unwrap_or(&0)
+                };
+
+                debug_log(&format!("Latest UID for folder {}: {}", folder, latest_uid));
+
+                // Logout
+                let _ = session.logout();
+
+                Ok(latest_uid)
+            }
+        }
+    }
+    
+    /// Fetch emails since a specific UID (for incremental sync)
+    pub fn fetch_emails_since_uid(&self, folder: &str, since_uid: u32) -> Result<Vec<Email>, EmailError> {
+        debug_log(&format!("fetch_emails_since_uid called: folder='{}', since_uid={}", folder, since_uid));
+        
+        match self.account.imap_security {
+            ImapSecurity::SSL | ImapSecurity::StartTLS => {
+                let mut session = self.connect_imap_secure()?;
+
+                // Select folder
+                session.select(folder)
+                    .map_err(|e| EmailError::ImapError(format!("Failed to select folder {}: {}", folder, e)))?;
+
+                // Search for emails with UID greater than since_uid
+                let search_query = format!("UID {}:*", since_uid);
+                let search_result = session.search(&search_query)
+                    .map_err(|e| EmailError::ImapError(format!("Failed to search emails since UID {}: {}", since_uid, e)))?;
+
+                if search_result.is_empty() {
+                    debug_log("No new emails found");
+                    let _ = session.logout();
+                    return Ok(vec![]);
+                }
+
+                debug_log(&format!("Found {} new emails since UID {}", search_result.len(), since_uid));
+
+                // Fetch the new emails
+                let sequence_set = search_result.iter().map(|uid| uid.to_string()).collect::<Vec<_>>().join(",");
+                let messages = session.fetch(&sequence_set, "RFC822 FLAGS")
+                    .map_err(|e| EmailError::ImapError(format!("Failed to fetch new emails: {}", e)))?;
+
+                let mut emails = Vec::new();
+                for message in messages.iter() {
+                    if let Some(body) = message.body() {
+                        match mail_parser::Message::parse(body) {
+                            Some(parsed) => {
+                                let uid = message.uid.unwrap_or(0).to_string();
+                                let flags = message.flags().iter().map(|f| f.to_string()).collect();
+                                
+                                match Email::from_parsed_email(&parsed, &uid, folder, flags) {
+                                    Ok(email) => emails.push(email),
+                                    Err(e) => debug_log(&format!("Failed to parse email {}: {}", uid, e)),
+                                }
+                            }
+                            None => debug_log("Failed to parse email body"),
+                        }
+                    }
+                }
+
+                debug_log(&format!("Successfully parsed {} new emails", emails.len()));
+
+                // Logout
+                let _ = session.logout();
+
+                Ok(emails)
+            }
+            ImapSecurity::None => {
+                let mut session = self.connect_imap_plain()?;
+
+                // Select folder
+                session.select(folder)
+                    .map_err(|e| EmailError::ImapError(format!("Failed to select folder {}: {}", folder, e)))?;
+
+                // Search for emails with UID greater than since_uid
+                let search_query = format!("UID {}:*", since_uid);
+                let search_result = session.search(&search_query)
+                    .map_err(|e| EmailError::ImapError(format!("Failed to search emails since UID {}: {}", since_uid, e)))?;
+
+                if search_result.is_empty() {
+                    debug_log("No new emails found");
+                    let _ = session.logout();
+                    return Ok(vec![]);
+                }
+
+                debug_log(&format!("Found {} new emails since UID {}", search_result.len(), since_uid));
+
+                // Fetch the new emails
+                let sequence_set = search_result.iter().map(|uid| uid.to_string()).collect::<Vec<_>>().join(",");
+                let messages = session.fetch(&sequence_set, "RFC822 FLAGS")
+                    .map_err(|e| EmailError::ImapError(format!("Failed to fetch new emails: {}", e)))?;
+
+                let mut emails = Vec::new();
+                for message in messages.iter() {
+                    if let Some(body) = message.body() {
+                        match mail_parser::Message::parse(body) {
+                            Some(parsed) => {
+                                let uid = message.uid.unwrap_or(0).to_string();
+                                let flags = message.flags().iter().map(|f| f.to_string()).collect();
+                                
+                                match Email::from_parsed_email(&parsed, &uid, folder, flags) {
+                                    Ok(email) => emails.push(email),
+                                    Err(e) => debug_log(&format!("Failed to parse email {}: {}", uid, e)),
+                                }
+                            }
+                            None => debug_log("Failed to parse email body"),
+                        }
+                    }
+                }
+
+                debug_log(&format!("Successfully parsed {} new emails", emails.len()));
+
+                // Logout
+                let _ = session.logout();
+
+                Ok(emails)
+            }
+        }
+    }
 }
 
 // Background email fetcher with IMAP IDLE support

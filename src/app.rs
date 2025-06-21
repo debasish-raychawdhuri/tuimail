@@ -1633,6 +1633,7 @@ impl App {
             }
             KeyCode::Enter => {
                 if let Some(idx) = self.selected_email_idx {
+                    debug_log(&format!("Enter pressed: idx={}, self.emails.len()={}", idx, self.emails.len()));
                     if idx < self.emails.len() {
                         self.mode = AppMode::ViewEmail;
 
@@ -1643,6 +1644,7 @@ impl App {
                             self.accounts.get(&self.current_account_idx)
                         {
                             let email = &self.emails[idx];
+                            debug_log(&format!("Opening email: subject={}", email.subject));
                             if !email.seen {
                                 // Queue mark as read operation instead of direct IMAP call
                                 if let Err(e) = self.mark_current_email_as_read() {
@@ -1654,9 +1656,11 @@ impl App {
                             }
                         }
                     } else {
+                        debug_log(&format!("Invalid email selection: idx={} >= self.emails.len()={}", idx, self.emails.len()));
                         self.show_error("Invalid email selection");
                     }
                 } else {
+                    debug_log("No email selected");
                     self.show_error("No email selected");
                 }
                 Ok(())
