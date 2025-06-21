@@ -1,6 +1,6 @@
-use crate::email::{Email, EmailAttachment};
+use crate::email::{Email, EmailAttachment, EmailAddress};
 use anyhow::{Result, Context};
-use chrono::{DateTime, Local};
+use chrono::{DateTime, Local, TimeZone};
 use rusqlite::{Connection, params};
 use serde_json;
 use std::path::Path;
@@ -574,7 +574,7 @@ impl EmailDatabase {
 
     /// Get recent emails with a limit for better performance
     /// Get the timestamp of the most recent email - much faster than loading emails
-    pub fn get_latest_email_timestamp(&self, account_email: &str, folder: &str) -> Result<Option<i64>> {
+    pub fn get_latest_email_timestamp_old(&self, account_email: &str, folder: &str) -> Result<Option<i64>> {
         let mut stmt = self.conn.prepare(
             "SELECT MAX(date_received) FROM emails WHERE account_email = ?1 AND folder = ?2"
         )?;
@@ -776,5 +776,181 @@ impl EmailDatabase {
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(0),
             Err(e) => Err(e.into()),
         }
+    }
+
+    /// Get all account/folder combinations in the database
+    pub fn get_all_folders(&self) -> Result<Vec<(String, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT account_email, folder FROM emails ORDER BY account_email, folder"
+        )?;
+        
+        let folder_iter = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+            ))
+        })?;
+        
+        let mut folders = Vec::new();
+        for folder in folder_iter {
+            folders.push(folder?);
+        }
+        
+        Ok(folders)
+    }
+
+    /// Get the latest email timestamp for an account/folder
+    pub fn get_latest_email_timestamp(&self, account_email: &str, folder: &str) -> Result<chrono::DateTime<chrono::Utc>> {
+        let result = self.conn.query_row(
+            "SELECT MAX(date) FROM emails WHERE account_email = ?1 AND folder = ?2",
+            params![account_email, folder],
+            |row| {
+                let date_str: Option<String> = row.get(0)?;
+                Ok(date_str)
+            }
+        );
+        
+        match result {
+            Ok(Some(date_str)) => {
+                // Parse the date string to DateTime<Utc>
+                if let Ok(local_dt) = chrono::DateTime::parse_from_rfc3339(&date_str) {
+                    Ok(local_dt.with_timezone(&chrono::Utc))
+                } else if let Ok(local_dt) = chrono::DateTime::parse_from_str(&date_str, "%Y-%m-%d %H:%M:%S%.f %z") {
+                    Ok(local_dt.with_timezone(&chrono::Utc))
+                } else {
+                    // Fallback to current time if parsing fails
+                    Ok(chrono::Utc::now())
+                }
+            }
+            Ok(None) | Err(rusqlite::Error::QueryReturnedNoRows) => {
+                // No emails found, return epoch
+                Ok(chrono::DateTime::from_timestamp(0, 0).unwrap_or_else(chrono::Utc::now))
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Get emails that arrived after a specific timestamp
+    pub fn get_emails_since_timestamp(
+        &self, 
+        account_email: &str, 
+        folder: &str, 
+        since: chrono::DateTime<chrono::Utc>
+    ) -> Result<Vec<Email>> {
+        let since_timestamp = since.timestamp();
+        
+        let mut stmt = self.conn.prepare(
+            "SELECT uid, message_id, subject, from_addresses, to_addresses, cc_addresses, bcc_addresses, 
+             date_received, body_text, body_html, flags, headers_json, seen
+             FROM emails 
+             WHERE account_email = ?1 AND folder = ?2 AND date_received > ?3
+             ORDER BY date_received DESC"
+        )?;
+        
+        let email_data: Result<Vec<_>, _> = stmt.query_map(params![account_email, folder, since_timestamp], |row| {
+            Ok((
+                row.get::<_, u32>(0)?,      // uid
+                row.get::<_, String>(1)?,   // message_id
+                row.get::<_, String>(2)?,   // subject
+                row.get::<_, String>(3)?,   // from_addresses
+                row.get::<_, String>(4)?,   // to_addresses
+                row.get::<_, String>(5)?,   // cc_addresses
+                row.get::<_, String>(6)?,   // bcc_addresses
+                row.get::<_, i64>(7)?,      // date_received
+                row.get::<_, Option<String>>(8)?, // body_text
+                row.get::<_, Option<String>>(9)?, // body_html
+                row.get::<_, String>(10)?,  // flags
+                row.get::<_, String>(11)?,  // headers_json
+                row.get::<_, bool>(12)?,    // seen
+            ))
+        })?.collect();
+        
+        let email_data = email_data?;
+        
+        if email_data.is_empty() {
+            return Ok(Vec::new());
+        }
+        
+        // Load ALL attachments for these emails in one query (much faster!)
+        let uids: Vec<String> = email_data.iter().map(|(uid, ..)| uid.to_string()).collect();
+        let uid_placeholders = uids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        
+        let attachment_query = format!(
+            "SELECT email_uid, filename, content_type, data FROM attachments 
+             WHERE account_email = ? AND folder = ? AND email_uid IN ({})",
+            uid_placeholders
+        );
+        
+        let mut attachment_stmt = self.conn.prepare(&attachment_query)?;
+        let mut params = vec![account_email.to_string(), folder.to_string()];
+        params.extend(uids);
+        
+        let attachment_rows = attachment_stmt.query_map(
+            rusqlite::params_from_iter(params.iter()),
+            |row| {
+                let email_uid: u32 = row.get(0)?;
+                let attachment = EmailAttachment {
+                    filename: row.get(1)?,
+                    content_type: row.get(2)?,
+                    data: row.get(3)?,
+                };
+                Ok((email_uid, attachment))
+            }
+        )?;
+
+        // Group attachments by email UID
+        let mut attachments_by_uid: std::collections::HashMap<u32, Vec<EmailAttachment>> = 
+            std::collections::HashMap::new();
+        
+        for attachment_result in attachment_rows {
+            let (email_uid, attachment) = attachment_result?;
+            attachments_by_uid.entry(email_uid).or_insert_with(Vec::new).push(attachment);
+        }
+        
+        // Now build the final email objects
+        let mut emails = Vec::new();
+        
+        for (uid, _message_id, subject, from_json, to_json, cc_json, bcc_json,
+             date_timestamp, body_text, body_html, flags_str, headers_str, seen) in email_data {
+            
+            let from_addresses: Vec<EmailAddress> = 
+                serde_json::from_str(&from_json).unwrap_or_default();
+            let to_addresses: Vec<EmailAddress> = 
+                serde_json::from_str(&to_json).unwrap_or_default();
+            let cc_addresses: Vec<EmailAddress> = 
+                serde_json::from_str(&cc_json).unwrap_or_default();
+            let bcc_addresses: Vec<EmailAddress> = 
+                serde_json::from_str(&bcc_json).unwrap_or_default();
+            let flags: Vec<String> = 
+                serde_json::from_str(&flags_str).unwrap_or_default();
+            let headers: std::collections::HashMap<String, String> = 
+                serde_json::from_str(&headers_str).unwrap_or_default();
+
+            // Get attachments for this email (already loaded)
+            let attachments = attachments_by_uid.remove(&uid).unwrap_or_default();
+
+            let email = Email {
+                id: uid.to_string(),
+                subject,
+                from: from_addresses,
+                to: to_addresses,
+                cc: cc_addresses,
+                bcc: bcc_addresses,
+                date: chrono::Local.timestamp_opt(date_timestamp, 0)
+                    .single()
+                    .unwrap_or_else(chrono::Local::now),
+                body_text,
+                body_html,
+                attachments,
+                flags,
+                headers,
+                seen,
+                folder: folder.to_string(),
+            };
+            
+            emails.push(email);
+        }
+        
+        Ok(emails)
     }
 }

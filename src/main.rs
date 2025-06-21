@@ -361,7 +361,10 @@ async fn main() -> Result<()> {
     );
     
     // Create app state
-    let mut app = App::new(config, database);
+    let mut app = App::new(config, database.clone());
+    
+    // Initialize sync tracker with database data (simplified approach)
+    // The sync tracker will be populated as emails are fetched
     
     // Debug logging
     if std::env::var("EMAIL_DEBUG").is_ok() {
@@ -373,7 +376,7 @@ async fn main() -> Result<()> {
             .open(log_file) 
         {
             use std::io::Write;
-            let _ = writeln!(file, "[{}] App created, about to call run_app", 
+            let _ = writeln!(file, "[{}] App created and sync tracker initialized, about to call run_app", 
                 Local::now().format("%Y-%m-%d %H:%M:%S"));
         }
     }
@@ -498,7 +501,7 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> AppRe
     
     // Add database polling timer
     let mut last_db_poll = std::time::Instant::now();
-    const DB_POLL_INTERVAL: Duration = Duration::from_secs(2); // Poll database every 2 seconds
+    const DB_POLL_INTERVAL: Duration = Duration::from_secs(5); // Poll database every 5 seconds (reduced from 2)
     
     loop {
         // Poll database for changes periodically

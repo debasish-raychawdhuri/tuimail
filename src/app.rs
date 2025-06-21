@@ -3,13 +3,49 @@ use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use std::thread;
 use std::collections::HashMap;
 
-use chrono::{DateTime, Local};
+use chrono::{DateTime, Local, Utc};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use thiserror::Error;
 
 use crate::config::{Config, EmailAccount};
 use crate::credentials::SecureCredentials;
 use crate::email::{debug_log, Email, EmailClient};
+
+// Global sync tracker for efficient new email detection
+static GLOBAL_SYNC_TIMESTAMPS: std::sync::OnceLock<Arc<std::sync::RwLock<HashMap<String, DateTime<Utc>>>>> = std::sync::OnceLock::new();
+
+fn get_global_sync_timestamps() -> &'static Arc<std::sync::RwLock<HashMap<String, DateTime<Utc>>>> {
+    GLOBAL_SYNC_TIMESTAMPS.get_or_init(|| Arc::new(std::sync::RwLock::new(HashMap::new())))
+}
+
+pub fn update_global_sync_timestamp(account_email: &str, folder: &str, timestamp: DateTime<Utc>) {
+    let key = format!("{}:{}", account_email, folder);
+    if let Ok(mut timestamps) = get_global_sync_timestamps().write() {
+        timestamps.insert(key, timestamp);
+    }
+}
+
+pub fn has_new_emails_since_global(account_email: &str, folder: &str, ui_timestamp: DateTime<Utc>) -> bool {
+    let key = format!("{}:{}", account_email, folder);
+    if let Ok(timestamps) = get_global_sync_timestamps().read() {
+        if let Some(latest_sync) = timestamps.get(&key) {
+            *latest_sync > ui_timestamp
+        } else {
+            true // If we don't have a sync timestamp, assume there might be new emails
+        }
+    } else {
+        true
+    }
+}
+
+pub fn get_global_sync_timestamp(account_email: &str, folder: &str) -> Option<DateTime<Utc>> {
+    let key = format!("{}:{}", account_email, folder);
+    if let Ok(timestamps) = get_global_sync_timestamps().read() {
+        timestamps.get(&key).copied()
+    } else {
+        None
+    }
+}
 
 #[derive(Error, Debug)]
 pub enum AppError {
@@ -170,6 +206,9 @@ pub struct App {
     // Background sync thread
     pub sync_thread_running: Arc<AtomicBool>,
     pub sync_thread_handle: Option<thread::JoinHandle<()>>,
+
+    // UI timestamp tracking for efficient new email detection
+    pub ui_timestamps: std::collections::HashMap<String, chrono::DateTime<chrono::Utc>>,
 }
 
 impl App {
@@ -311,6 +350,9 @@ impl App {
             // Background sync thread
             sync_thread_running: Arc::new(AtomicBool::new(false)),
             sync_thread_handle: None,
+
+            // UI timestamp tracking
+            ui_timestamps: std::collections::HashMap::new(),
         }
     }
 
@@ -1376,7 +1418,7 @@ impl App {
         debug_log("App cleanup completed");
     }
 
-    /// Refresh emails from database (called periodically)
+    /// Refresh emails from database (called periodically) - optimized with sync tracker
     pub fn refresh_emails_from_database(&mut self) -> AppResult<()> {
         if let Some((account_idx, folder_path)) = self.get_selected_folder_info() {
             let account_email = if let Some(account_data) = self.accounts.get(&account_idx) {
@@ -1385,54 +1427,67 @@ impl App {
                 return Ok(());
             };
 
-            // Get current email count to detect changes
-            let current_count = if let Some(account_data) = self.accounts.get(&account_idx) {
-                account_data.emails.len()
-            } else {
-                0
-            };
+            // Get UI's last known timestamp for this account/folder
+            let ui_key = format!("{}:{}", account_email, folder_path);
+            let ui_timestamp = self.ui_timestamps.get(&ui_key)
+                .copied()
+                .unwrap_or_else(|| chrono::DateTime::from_timestamp(0, 0).unwrap_or_else(chrono::Utc::now));
 
-            // Check database for new emails
-            match self.database.get_email_count(&account_email, &folder_path) {
-                Ok(db_count) if db_count != current_count => {
+            // Check if there are potentially new emails using the sync tracker
+            if !has_new_emails_since_global(&account_email, &folder_path, ui_timestamp) {
+                // No new emails detected, skip expensive database queries
+                return Ok(());
+            }
+
+            debug_log(&format!(
+                "Sync tracker indicates new emails for {}/{}, checking database",
+                account_email, folder_path
+            ));
+
+            // Get emails that arrived after our UI timestamp
+            match self.database.get_emails_since_timestamp(&account_email, &folder_path, ui_timestamp) {
+                Ok(new_emails) if !new_emails.is_empty() => {
                     debug_log(&format!(
-                        "Email count changed from {} to {} for {}/{}, refreshing",
-                        current_count, db_count, account_email, folder_path
+                        "Found {} new emails for {}/{} since {}",
+                        new_emails.len(), account_email, folder_path, ui_timestamp
                     ));
                     
-                    // Reload emails from database
-                    self.load_emails_for_account_folder(account_idx, &folder_path)?;
-                }
-                Ok(_) => {
-                    // Count is the same, but check for flag updates (seen/unseen changes)
-                    if let Ok(fresh_emails) = self.database.get_emails_paginated(&account_email, &folder_path, 0, 100) {
-                        if let Some(account_data) = self.accounts.get_mut(&account_idx) {
-                            // Check if any email flags have changed
-                            let mut changed = false;
-                            for (i, fresh_email) in fresh_emails.iter().enumerate() {
-                                if let Some(current_email) = account_data.emails.get(i) {
-                                    if current_email.seen != fresh_email.seen {
-                                        changed = true;
-                                        break;
-                                    }
-                                }
-                            }
-                            
-                            if changed {
-                                debug_log(&format!("Email flags changed for {}/{}, refreshing", account_email, folder_path));
-                                account_data.emails = fresh_emails;
-                                if account_idx == self.current_account_idx {
-                                    self.emails = account_data.emails.clone();
-                                }
-                            }
+                    // Merge new emails with existing ones
+                    if let Some(account_data) = self.accounts.get_mut(&account_idx) {
+                        // Add new emails to the beginning (most recent first)
+                        let mut updated_emails = new_emails;
+                        updated_emails.extend(account_data.emails.clone());
+                        
+                        // Remove duplicates based on ID
+                        updated_emails.sort_by(|a, b| b.date.cmp(&a.date)); // Sort by date descending
+                        updated_emails.dedup_by(|a, b| a.id == b.id);
+                        
+                        account_data.emails = updated_emails;
+                        
+                        // Update UI emails if this is the current account
+                        if account_idx == self.current_account_idx {
+                            self.emails = account_data.emails.clone();
+                        }
+                        
+                        // Update UI timestamp to the latest email timestamp
+                        if let Some(latest_email) = account_data.emails.first() {
+                            let email_time = latest_email.date.with_timezone(&chrono::Utc);
+                            self.ui_timestamps.insert(ui_key, email_time);
                         }
                     }
                 }
+                Ok(_) => {
+                    // No new emails, but update UI timestamp to current sync timestamp
+                    if let Some(sync_timestamp) = get_global_sync_timestamp(&account_email, &folder_path) {
+                        self.ui_timestamps.insert(ui_key, sync_timestamp);
+                    }
+                }
                 Err(e) => {
-                    debug_log(&format!("Failed to check email count: {}", e));
+                    debug_log(&format!("Error checking for new emails: {}", e));
                 }
             }
         }
+        
         Ok(())
     }
 

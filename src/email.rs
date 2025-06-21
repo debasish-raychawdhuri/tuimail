@@ -985,6 +985,17 @@ impl EmailClient {
                 self.save_folder_metadata(folder, &metadata);
                 debug_log("Saved updated cache and metadata");
                 
+                // Update sync tracker with latest timestamp
+                if let Some(latest_email) = merged.first() {
+                    let email_time = latest_email.date.with_timezone(&chrono::Utc);
+                    crate::app::update_global_sync_timestamp(
+                        &self.account.email, 
+                        folder, 
+                        email_time
+                    );
+                    debug_log(&format!("Updated sync tracker timestamp for {}/{}", self.account.email, folder));
+                }
+                
                 // Return all emails (or limited for display)
                 let display_limit = if limit == 0 { merged.len() } else { std::cmp::max(limit, 100) }; // Show all if limit is 0
                 let result_count = std::cmp::min(display_limit, merged.len());
