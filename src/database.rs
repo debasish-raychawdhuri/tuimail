@@ -1,4 +1,4 @@
-use crate::email::{Email, EmailAttachment, EmailAddress};
+use crate::email::{Email, EmailAttachment, EmailAddress, debug_log};
 use anyhow::{Result, Context};
 use chrono::{DateTime, Local, TimeZone};
 use rusqlite::{Connection, params};
@@ -58,6 +58,17 @@ impl EmailDatabase {
             )",
             [],
         )?;
+
+        // Add regular index on message_id for performance (not unique to allow duplicates)
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_message_id 
+             ON emails(account_email, folder, message_id) 
+             WHERE message_id IS NOT NULL",
+            [],
+        )?;
+
+        // Migrate existing emails to extract Message-ID from headers
+        self.migrate_message_ids()?;
 
         // Create attachments table
         self.conn.execute(
@@ -122,7 +133,51 @@ impl EmailDatabase {
             [],
         )?;
 
+        // Drop the unique index if it exists (it causes constraint violations)
+        self.conn.execute("DROP INDEX IF EXISTS idx_message_id", [])?;
+
+        // Migrate existing emails to extract Message-ID from headers
+        self.migrate_message_ids()?;
+
         Ok(())
+    }
+
+    /// Migrate existing emails to extract Message-ID from headers JSON
+    fn migrate_message_ids(&self) -> Result<()> {
+        // Check if migration is needed
+        let null_count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM emails WHERE message_id IS NULL",
+            [],
+            |row| row.get(0)
+        )?;
+
+        if null_count == 0 {
+            return Ok(()); // No migration needed
+        }
+
+        debug_log(&format!("Migrating {} emails to extract Message-IDs from headers...", null_count));
+
+        // Update emails with Message-ID extracted from headers JSON
+        let updated = self.conn.execute(
+            "UPDATE emails 
+             SET message_id = json_extract(headers, '$.\"Message-ID\"')
+             WHERE message_id IS NULL 
+             AND json_extract(headers, '$.\"Message-ID\"') IS NOT NULL",
+            []
+        )?;
+
+        debug_log(&format!("Successfully migrated {} emails with Message-IDs", updated));
+        Ok(())
+    }
+
+    /// Check if an email with the given Message-ID already exists
+    pub fn message_id_exists(&self, account_email: &str, folder: &str, message_id: &str) -> Result<bool> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM emails WHERE account_email = ?1 AND folder = ?2 AND message_id = ?3",
+            params![account_email, folder, message_id],
+            |row| row.get(0)
+        )?;
+        Ok(count > 0)
     }
 
     pub fn save_emails(&self, account_email: &str, folder: &str, emails: &[Email]) -> Result<()> {
@@ -143,7 +198,7 @@ impl EmailDatabase {
                     uid,
                     account_email,
                     folder,
-                    None::<String>, // We don't have message_id in current Email struct
+                    Some(email.message_id()), // Extract Message-ID from headers
                     email.subject,
                     serde_json::to_string(&email.from)?,
                     serde_json::to_string(&email.to)?,
@@ -841,7 +896,7 @@ impl EmailDatabase {
         
         let mut stmt = self.conn.prepare(
             "SELECT uid, message_id, subject, from_addresses, to_addresses, cc_addresses, bcc_addresses, 
-             date_received, body_text, body_html, flags, headers_json, seen
+             date_received, body_text, body_html, flags, headers, seen
              FROM emails 
              WHERE account_email = ?1 AND folder = ?2 AND date_received > ?3
              ORDER BY date_received DESC"
@@ -850,7 +905,7 @@ impl EmailDatabase {
         let email_data: Result<Vec<_>, _> = stmt.query_map(params![account_email, folder, since_timestamp], |row| {
             Ok((
                 row.get::<_, u32>(0)?,      // uid
-                row.get::<_, String>(1)?,   // message_id
+                row.get::<_, Option<String>>(1)?,   // message_id (handle existing NULLs)
                 row.get::<_, String>(2)?,   // subject
                 row.get::<_, String>(3)?,   // from_addresses
                 row.get::<_, String>(4)?,   // to_addresses
@@ -860,7 +915,7 @@ impl EmailDatabase {
                 row.get::<_, Option<String>>(8)?, // body_text
                 row.get::<_, Option<String>>(9)?, // body_html
                 row.get::<_, String>(10)?,  // flags
-                row.get::<_, String>(11)?,  // headers_json
+                row.get::<_, String>(11)?,  // headers
                 row.get::<_, bool>(12)?,    // seen
             ))
         })?.collect();

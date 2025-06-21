@@ -1055,7 +1055,7 @@ impl App {
         }
     }
 
-    /// Load emails for a specific account and folder - DATABASE ONLY VERSION
+    /// Load emails for a specific account and folder - SYNC WITH IMAP SERVER
     pub fn load_emails_for_account_folder(
         &mut self,
         account_idx: usize,
@@ -1064,37 +1064,35 @@ impl App {
         // Ensure the account is initialized
         self.ensure_account_initialized(account_idx)?;
 
-        let (account_email, account_db_path) = if let Some(account_data) = self.accounts.get(&account_idx) {
-            // Create account-specific database path (same logic as EmailClient)
-            let cache_dir = format!("{}/.cache/tuimail/{}", 
-                dirs::home_dir().unwrap_or_default().display(), 
-                account_data.account.email.replace('@', "_at_").replace('.', "_"));
-            let db_path = std::path::PathBuf::from(&cache_dir).join("emails.db");
-            (account_data.account.email.clone(), db_path)
+        let account_data = if let Some(account_data) = self.accounts.get(&account_idx) {
+            account_data.account.clone()
         } else {
             return Err(AppError::EmailError(crate::email::EmailError::ImapError(
                 "Account not found".to_string(),
             )));
         };
         
-        // Use account-specific database instead of shared database
-        let account_database = crate::database::EmailDatabase::new(&account_db_path)
-            .map_err(|e| AppError::EmailError(crate::email::EmailError::ImapError(
-                format!("Failed to open account database: {}", e)
-            )))?;
+        // Create EmailClient for this account to sync with IMAP server
+        let client = EmailClient::new(account_data.clone(), self.credentials.clone());
         
-        // Load emails from account-specific database
-        match account_database.get_all_emails(&account_email, folder) {
-            Ok(db_emails) => {
+        debug_log(&format!(
+            "Starting IMAP sync for {}/{}",
+            account_data.email,
+            folder
+        ));
+        
+        // Fetch emails from IMAP server (this will sync and update the database)
+        match client.fetch_emails(folder, 0) { // 0 means fetch all emails
+            Ok(synced_emails) => {
                 debug_log(&format!(
-                    "Loaded {} emails from database for {}/{}",
-                    db_emails.len(),
-                    account_email,
+                    "Successfully synced {} emails from IMAP server for {}/{}",
+                    synced_emails.len(),
+                    account_data.email,
                     folder
                 ));
                 
                 if let Some(account_data) = self.accounts.get_mut(&account_idx) {
-                    account_data.emails = db_emails;
+                    account_data.emails = synced_emails;
 
                     // Update legacy fields for backward compatibility
                     if account_idx == self.current_account_idx {
@@ -1102,35 +1100,69 @@ impl App {
                     }
                 }
 
-                // Check if sync is stale and request background sync if needed
-                if let Err(e) = self.request_sync_if_stale(&account_email, folder) {
-                    debug_log(&format!("Failed to request sync: {}", e));
-                }
-
                 Ok(())
             }
             Err(e) => {
                 debug_log(&format!(
-                    "Failed to load emails from database for {}/{}: {}",
-                    account_email,
+                    "Failed to sync emails from IMAP server for {}/{}: {}",
+                    account_data.email,
                     folder,
                     e
                 ));
                 
-                // Still return Ok but with empty emails - sync daemon will populate
-                if let Some(account_data) = self.accounts.get_mut(&account_idx) {
-                    account_data.emails = Vec::new();
-                    if account_idx == self.current_account_idx {
-                        self.emails = Vec::new();
+                // Fallback to loading from database if IMAP sync fails
+                let cache_dir = format!("{}/.cache/tuimail/{}", 
+                    dirs::home_dir().unwrap_or_default().display(), 
+                    account_data.email.replace('@', "_at_").replace('.', "_"));
+                let db_path = std::path::PathBuf::from(&cache_dir).join("emails.db");
+                
+                let account_database = crate::database::EmailDatabase::new(&db_path)
+                    .map_err(|e| AppError::EmailError(crate::email::EmailError::ImapError(
+                        format!("Failed to open account database: {}", e)
+                    )))?;
+                
+                match account_database.get_all_emails(&account_data.email, folder) {
+                    Ok(db_emails) => {
+                        debug_log(&format!(
+                            "Fallback: Loaded {} emails from database for {}/{}",
+                            db_emails.len(),
+                            account_data.email,
+                            folder
+                        ));
+                        
+                        if let Some(account_data) = self.accounts.get_mut(&account_idx) {
+                            account_data.emails = db_emails;
+
+                            // Update legacy fields for backward compatibility
+                            if account_idx == self.current_account_idx {
+                                self.emails = account_data.emails.clone();
+                            }
+                        }
+                        
+                        // Show warning that we're using cached data
+                        self.show_error(&format!("IMAP sync failed, showing cached emails: {}", e));
+                        Ok(())
+                    }
+                    Err(db_e) => {
+                        debug_log(&format!(
+                            "Both IMAP sync and database fallback failed for {}/{}: IMAP: {}, DB: {}",
+                            account_data.email,
+                            folder,
+                            e,
+                            db_e
+                        ));
+                        
+                        // Set empty emails if both fail
+                        if let Some(account_data) = self.accounts.get_mut(&account_idx) {
+                            account_data.emails = Vec::new();
+                            if account_idx == self.current_account_idx {
+                                self.emails = Vec::new();
+                            }
+                        }
+                        
+                        Err(AppError::EmailError(e))
                     }
                 }
-                
-                // Request immediate sync for empty database
-                if let Err(e) = self.request_immediate_sync(&account_email, folder) {
-                    debug_log(&format!("Failed to request immediate sync: {}", e));
-                }
-                
-                Ok(())
             }
         }
     }
@@ -3438,33 +3470,35 @@ impl App {
                 if client.supports_idle() {
                     debug_log("Starting background email fetching with IDLE support");
 
-                    // OLD BACKGROUND THREADING CODE - DISABLED IN NEW ARCHITECTURE
-                    // The sync daemon now handles background email fetching
-                    /*
                     let running = std::sync::Arc::new(std::sync::Mutex::new(true));
 
                     // Clone what we need for the background thread
                     let client_clone = client.clone();
                     let folder_clone = folder.to_string();
                     let running_clone = running.clone();
-                    let database_clone = self.database.clone();
 
-                    // Start background thread
+                    // Start background thread - it will create its own database connection
                     std::thread::spawn(move || {
-                        if let Err(e) =
-                            client_clone.run_idle_session(&folder_clone, &database_clone, &running_clone)
-                        {
-                            debug_log(&format!("IDLE session ended with error: {}", e));
+                        // Create a new database connection for this thread
+                        let cache_dir = format!("{}/.cache/tuimail", std::env::var("HOME").unwrap_or_default());
+                        let db_path = std::path::PathBuf::from(&cache_dir).join("emails.db");
+                        
+                        match crate::database::EmailDatabase::new(&db_path) {
+                            Ok(database) => {
+                                if let Err(e) = client_clone.run_idle_session(&folder_clone, &database, &running_clone) {
+                                    debug_log(&format!("IDLE session ended with error: {}", e));
+                                }
+                            }
+                            Err(e) => {
+                                debug_log(&format!("Failed to create database connection in background thread: {}", e));
+                            }
                         }
                     });
 
                     // No longer need email_receiver since we're using database
                     self.email_receiver = None;
                     self.fetcher_running = Some(running);
-                    */
                     
-                    debug_log("Background email fetching disabled - using sync daemon instead");
-
                     debug_log("Background email fetching started");
                 } else {
                     debug_log("Server does not support IDLE, background fetching disabled");
