@@ -488,6 +488,83 @@ impl EmailDatabase {
         Ok(emails)
     }
 
+    pub fn get_all_emails(&self, account_email: &str, folder: &str) -> Result<Vec<Email>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT uid, message_id, subject, from_addresses, to_addresses, 
+                    cc_addresses, bcc_addresses, date_received, body_text, body_html,
+                    flags, headers, seen
+             FROM emails 
+             WHERE account_email = ?1 AND folder = ?2 
+             ORDER BY date_received DESC",
+        )?;
+
+        let email_rows = stmt.query_map(params![account_email, folder], |row| {
+            Ok((
+                row.get::<_, u32>(0)?,       // uid
+                row.get::<_, Option<String>>(1)?, // message_id
+                row.get::<_, String>(2)?,    // subject
+                row.get::<_, String>(3)?,    // from_addresses
+                row.get::<_, String>(4)?,    // to_addresses
+                row.get::<_, String>(5)?,    // cc_addresses
+                row.get::<_, String>(6)?,    // bcc_addresses
+                row.get::<_, i64>(7)?,       // date_received
+                row.get::<_, Option<String>>(8)?, // body_text
+                row.get::<_, Option<String>>(9)?, // body_html
+                row.get::<_, String>(10)?,   // flags
+                row.get::<_, String>(11)?,   // headers
+                row.get::<_, bool>(12)?,     // seen
+            ))
+        })?;
+
+        let mut emails = Vec::new();
+        for row_result in email_rows {
+            let (uid, _message_id, subject, from_json, to_json, cc_json, bcc_json,
+                 date_timestamp, body_text, body_html, flags_json, headers_json, seen) = row_result?;
+
+            // Load attachments for this email
+            let mut attachment_stmt = self.conn.prepare(
+                "SELECT filename, content_type, data FROM attachments 
+                 WHERE account_email = ?1 AND folder = ?2 AND email_uid = ?3"
+            )?;
+            
+            let attachment_rows = attachment_stmt.query_map(params![account_email, folder, uid], |row| {
+                Ok(crate::email::EmailAttachment {
+                    filename: row.get(0)?,
+                    content_type: row.get(1)?,
+                    data: row.get(2)?,
+                })
+            })?;
+
+            let mut attachments = Vec::new();
+            for attachment_result in attachment_rows {
+                attachments.push(attachment_result?);
+            }
+
+            let email = Email {
+                id: uid.to_string(), // Convert UID back to string for Email struct
+                subject,
+                from: serde_json::from_str(&from_json)?,
+                to: serde_json::from_str(&to_json)?,
+                cc: serde_json::from_str(&cc_json)?,
+                bcc: serde_json::from_str(&bcc_json)?,
+                date: chrono::DateTime::from_timestamp(date_timestamp, 0)
+                    .unwrap_or_else(|| chrono::Local::now().into())
+                    .with_timezone(&chrono::Local),
+                body_text,
+                body_html,
+                attachments,
+                flags: serde_json::from_str(&flags_json)?,
+                headers: serde_json::from_str(&headers_json)?,
+                seen,
+                folder: folder.to_string(),
+            };
+
+            emails.push(email);
+        }
+
+        Ok(emails)
+    }
+
     pub fn update_email_seen_status(&self, account_email: &str, folder: &str, uid: u32, seen: bool) -> Result<()> {
         self.conn.execute(
             "UPDATE emails SET seen = ?1, updated_at = strftime('%s', 'now') 
@@ -510,5 +587,33 @@ impl EmailDatabase {
         ).unwrap_or(0);
 
         Ok(current_time - last_sync > max_age_seconds)
+    }
+
+    pub fn clear_folder_emails(&self, account_email: &str, folder: &str) -> Result<()> {
+        // Clear emails for this folder
+        self.conn.execute(
+            "DELETE FROM emails WHERE account_email = ?1 AND folder = ?2",
+            params![account_email, folder],
+        )?;
+        
+        // Clear attachments for this folder
+        self.conn.execute(
+            "DELETE FROM attachments WHERE account_email = ?1 AND folder = ?2",
+            params![account_email, folder],
+        )?;
+        
+        // Reset folder metadata
+        self.conn.execute(
+            "DELETE FROM folder_metadata WHERE account_email = ?1 AND folder = ?2",
+            params![account_email, folder],
+        )?;
+        
+        // Reset sync state
+        self.conn.execute(
+            "DELETE FROM sync_state WHERE account_email = ?1 AND folder = ?2",
+            params![account_email, folder],
+        )?;
+        
+        Ok(())
     }
 }

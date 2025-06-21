@@ -986,9 +986,9 @@ impl EmailClient {
                 debug_log("Saved updated cache and metadata");
                 
                 // Return all emails (or limited for display)
-                let display_limit = std::cmp::max(limit, 100); // Show at least 100 emails
+                let display_limit = if limit == 0 { merged.len() } else { std::cmp::max(limit, 100) }; // Show all if limit is 0
                 let result_count = std::cmp::min(display_limit, merged.len());
-                debug_log(&format!("Returning {} emails for display", result_count));
+                debug_log(&format!("Returning {} emails for display (limit={}, merged={})", result_count, limit, merged.len()));
                 Ok(merged.into_iter().take(result_count).collect())
             }
             Err(e) => {
@@ -1032,45 +1032,57 @@ impl EmailClient {
         debug_log(&format!("Folder '{}' has {} total messages, we have {} cached", 
             folder, current_total, metadata.downloaded_uids.len()));
 
-        // First time sync - fetch recent messages
+        // First time sync - fetch ALL messages
         if metadata.last_uid == 0 {
-            debug_log("First time sync - fetching recent messages");
+            debug_log("First time sync - fetching ALL messages");
             
             // Check if the folder is empty
             if current_total == 0 {
                 debug_log("Folder is empty, skipping fetch");
                 return Ok(Vec::new()); // Return empty vector for empty folders
             }
-            let fetch_count = std::cmp::min(100, current_total); // Fetch last 100 messages initially
-            let start_seq = if current_total > fetch_count {
-                current_total - fetch_count + 1
-            } else {
-                1
-            };
             
-            let sequence = format!("{}:{}", start_seq, current_total);
-            debug_log(&format!("Initial sync: fetching messages {}", sequence));
+            // For initial sync, fetch ALL messages in batches to avoid memory issues
+            let batch_size = 500; // Fetch in batches of 500
+            let mut all_emails = Vec::new();
+            let mut current_seq = 1;
             
-            let messages = session
-                .fetch(sequence, "(RFC822 FLAGS UID)")
-                .map_err(|e| EmailError::ImapError(e.to_string()))?;
+            while current_seq <= current_total {
+                let end_seq = std::cmp::min(current_seq + batch_size - 1, current_total);
+                let sequence = format!("{}:{}", current_seq, end_seq);
+                
+                debug_log(&format!("Initial sync batch: fetching messages {} (batch {}/{})", 
+                    sequence, (current_seq - 1) / batch_size + 1, (current_total + batch_size - 1) / batch_size));
+                
+                let messages = session
+                    .fetch(&sequence, "(RFC822 FLAGS UID)")
+                    .map_err(|e| EmailError::ImapError(e.to_string()))?;
 
-            debug_log(&format!("Initial sync: fetched {} messages", messages.len()));
-            
-            let new_emails = self.parse_messages(&messages, folder)?;
-            
-            // Update metadata with all fetched UIDs
-            for message in &messages {
-                if let Some(uid) = message.uid {
-                    metadata.downloaded_uids.insert(uid);
-                    if uid > metadata.last_uid {
-                        metadata.last_uid = uid;
+                debug_log(&format!("Fetched {} messages in this batch", messages.len()));
+                
+                let batch_emails = self.parse_messages(&messages, folder)?;
+                all_emails.extend(batch_emails);
+                
+                // Update metadata with all fetched UIDs
+                for message in &messages {
+                    if let Some(uid) = message.uid {
+                        metadata.downloaded_uids.insert(uid);
+                        if uid > metadata.last_uid {
+                            metadata.last_uid = uid;
+                        }
                     }
                 }
+                
+                current_seq = end_seq + 1;
+                
+                // Small delay between batches to be nice to the server
+                std::thread::sleep(std::time::Duration::from_millis(100));
             }
-            metadata.total_messages = current_total;
             
-            return Ok(new_emails);
+            metadata.total_messages = current_total;
+            debug_log(&format!("Initial sync complete: fetched {} total emails", all_emails.len()));
+            
+            return Ok(all_emails);
         }
 
         // Incremental sync - fetch only new messages
@@ -1121,45 +1133,57 @@ impl EmailClient {
         debug_log(&format!("Folder '{}' has {} total messages, we have {} cached", 
             folder, current_total, metadata.downloaded_uids.len()));
 
-        // First time sync - fetch recent messages
+        // First time sync - fetch ALL messages
         if metadata.last_uid == 0 {
-            debug_log("First time sync - fetching recent messages");
+            debug_log("First time sync - fetching ALL messages");
             
             // Check if the folder is empty
             if current_total == 0 {
                 debug_log("Folder is empty, skipping fetch");
                 return Ok(Vec::new()); // Return empty vector for empty folders
             }
-            let fetch_count = std::cmp::min(100, current_total); // Fetch last 100 messages initially
-            let start_seq = if current_total > fetch_count {
-                current_total - fetch_count + 1
-            } else {
-                1
-            };
             
-            let sequence = format!("{}:{}", start_seq, current_total);
-            debug_log(&format!("Initial sync: fetching messages {}", sequence));
+            // For initial sync, fetch ALL messages in batches to avoid memory issues
+            let batch_size = 500; // Fetch in batches of 500
+            let mut all_emails = Vec::new();
+            let mut current_seq = 1;
             
-            let messages = session
-                .fetch(sequence, "(RFC822 FLAGS UID)")
-                .map_err(|e| EmailError::ImapError(e.to_string()))?;
+            while current_seq <= current_total {
+                let end_seq = std::cmp::min(current_seq + batch_size - 1, current_total);
+                let sequence = format!("{}:{}", current_seq, end_seq);
+                
+                debug_log(&format!("Initial sync batch: fetching messages {} (batch {}/{})", 
+                    sequence, (current_seq - 1) / batch_size + 1, (current_total + batch_size - 1) / batch_size));
+                
+                let messages = session
+                    .fetch(&sequence, "(RFC822 FLAGS UID)")
+                    .map_err(|e| EmailError::ImapError(e.to_string()))?;
 
-            debug_log(&format!("Initial sync: fetched {} messages", messages.len()));
-            
-            let new_emails = self.parse_messages(&messages, folder)?;
-            
-            // Update metadata with all fetched UIDs
-            for message in &messages {
-                if let Some(uid) = message.uid {
-                    metadata.downloaded_uids.insert(uid);
-                    if uid > metadata.last_uid {
-                        metadata.last_uid = uid;
+                debug_log(&format!("Fetched {} messages in this batch", messages.len()));
+                
+                let batch_emails = self.parse_messages(&messages, folder)?;
+                all_emails.extend(batch_emails);
+                
+                // Update metadata with all fetched UIDs
+                for message in &messages {
+                    if let Some(uid) = message.uid {
+                        metadata.downloaded_uids.insert(uid);
+                        if uid > metadata.last_uid {
+                            metadata.last_uid = uid;
+                        }
                     }
                 }
+                
+                current_seq = end_seq + 1;
+                
+                // Small delay between batches to be nice to the server
+                std::thread::sleep(std::time::Duration::from_millis(100));
             }
-            metadata.total_messages = current_total;
             
-            return Ok(new_emails);
+            metadata.total_messages = current_total;
+            debug_log(&format!("Initial sync complete: fetched {} total emails", all_emails.len()));
+            
+            return Ok(all_emails);
         }
 
         // Incremental sync - fetch only new messages
@@ -2232,7 +2256,7 @@ impl EmailFetcher {
                 should_continue
             } {
                 // Fetch emails without holding the lock during network operations
-                match client.fetch_emails(&current_folder, 50) {
+                match client.fetch_emails(&current_folder, 200) {
                     Ok(emails) => {
                         // Try to send emails
                         if let Err(e) = tx.send(emails) {

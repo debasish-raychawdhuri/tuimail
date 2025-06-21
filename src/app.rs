@@ -1022,16 +1022,27 @@ impl App {
         // Ensure the account is initialized
         self.ensure_account_initialized(account_idx)?;
 
-        let account_email = if let Some(account_data) = self.accounts.get(&account_idx) {
-            account_data.account.email.clone()
+        let (account_email, account_db_path) = if let Some(account_data) = self.accounts.get(&account_idx) {
+            // Create account-specific database path (same logic as EmailClient)
+            let cache_dir = format!("{}/.cache/tuimail/{}", 
+                dirs::home_dir().unwrap_or_default().display(), 
+                account_data.account.email.replace('@', "_at_").replace('.', "_"));
+            let db_path = std::path::PathBuf::from(&cache_dir).join("emails.db");
+            (account_data.account.email.clone(), db_path)
         } else {
             return Err(AppError::EmailError(crate::email::EmailError::ImapError(
                 "Account not found".to_string(),
             )));
         };
         
-        // ONLY load emails from database - never fetch from IMAP directly
-        match self.database.get_emails_paginated(&account_email, folder, 0, 100) {
+        // Use account-specific database instead of shared database
+        let account_database = crate::database::EmailDatabase::new(&account_db_path)
+            .map_err(|e| AppError::EmailError(crate::email::EmailError::ImapError(
+                format!("Failed to open account database: {}", e)
+            )))?;
+        
+        // Load emails from account-specific database
+        match account_database.get_all_emails(&account_email, folder) {
             Ok(db_emails) => {
                 debug_log(&format!(
                     "Loaded {} emails from database for {}/{}",
@@ -1225,6 +1236,18 @@ impl App {
         Ok(())
     }
 
+    /// Reset sync state to force full re-sync of current folder
+    pub fn reset_sync_state(&mut self) -> AppResult<()> {
+        if let Some(account_data) = self.accounts.get(&self.current_account_idx) {
+            // Clear database entries for this folder
+            self.database.clear_folder_emails(&account_data.account.email, &self.selected_folder)?;
+            
+            self.info_message = Some("Sync state reset. Next refresh will fetch all emails.".to_string());
+            self.message_timeout = Some(Instant::now() + Duration::from_secs(3));
+        }
+        Ok(())
+    }
+
     /// Start background sync thread
     pub fn start_background_sync(&mut self) -> AppResult<()> {
         // Don't start if already running
@@ -1286,7 +1309,7 @@ impl App {
                             Ok(folders) => {
                                 for folder in folders {
                                     if folder == "INBOX" {
-                                        match client.fetch_emails(&folder, 50) {
+                                        match client.fetch_emails(&folder, 0) {
                                             Ok(emails) => {
                                                 // Store emails in database
                                                 if let Err(e) = database.save_emails(&account.email, &folder, &emails) {
@@ -1565,6 +1588,17 @@ impl App {
             KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 // Test file browser
                 self.test_file_browser()?;
+                Ok(())
+            }
+            KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                // Full re-sync: clear cache and fetch all emails
+                if let Err(e) = self.reset_sync_state() {
+                    self.show_error(&format!("Failed to reset sync state: {}", e));
+                } else if let Err(e) = self.load_emails_for_selected_folder() {
+                    self.show_error(&format!("Failed to refresh emails: {}", e));
+                } else {
+                    self.show_info("Full re-sync completed - all emails fetched");
+                }
                 Ok(())
             }
             KeyCode::Char('r') => {
