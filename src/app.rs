@@ -177,6 +177,11 @@ pub struct App {
     pub spell_check_enabled: bool,
     pub show_spell_suggestions: bool,
     pub selected_spell_suggestion: usize,
+    
+    // Incremental spell checking
+    pub last_checked_text: String,
+    pub last_cursor_word_pos: Option<(usize, usize)>, // (start, end) of last checked word
+    pub last_keystroke_time: Option<std::time::Instant>, // For debounced spell checking
 
     // Grammar checking (async)
     pub async_grammar_checker: Option<crate::async_grammar::AsyncGrammarChecker>,
@@ -209,6 +214,9 @@ pub struct App {
 
     // UI timestamp tracking for efficient new email detection
     pub ui_timestamps: std::collections::HashMap<String, chrono::DateTime<chrono::Utc>>,
+    
+    // Address field parsing optimization
+    pub address_fields_dirty: bool,
 }
 
 impl App {
@@ -321,10 +329,15 @@ impl App {
             show_spell_suggestions: false,
             selected_spell_suggestion: 0,
             
+            // Initialize incremental spell checking
+            last_checked_text: String::new(),
+            last_cursor_word_pos: None,
+            last_keystroke_time: None,
+            
             // Initialize async grammar checking
             async_grammar_checker: Self::init_async_grammar_checker(),
             grammar_errors: Vec::new(),
-            grammar_check_enabled: true,
+            grammar_check_enabled: false, // Start with grammar checking disabled for performance
             show_grammar_suggestions: false,
             selected_grammar_suggestion: 0,
             last_grammar_request_id: 0,
@@ -353,6 +366,9 @@ impl App {
 
             // UI timestamp tracking
             ui_timestamps: std::collections::HashMap::new(),
+            
+            // Address field parsing optimization
+            address_fields_dirty: false,
         }
     }
 
@@ -387,40 +403,300 @@ impl App {
         }
     }
 
-    /// Check spelling of current compose field
+    /// Force spell checking to run immediately (ignoring debounce)
+    pub fn force_spell_check(&mut self) {
+        self.last_keystroke_time = None; // Clear debounce timer
+        self.check_spelling();
+    }
+
+    /// Check if spell checking should run based on debounce timer
+    pub fn update_spell_check(&mut self) {
+        // Disable spell checking completely to fix performance issues
+        return;
+        
+        if self.spell_check_enabled && self.should_run_spell_check() {
+            self.check_spelling();
+        }
+    }
+
+    /// Mark that a keystroke occurred (for debounced spell checking)
+    pub fn mark_keystroke(&mut self) {
+        self.last_keystroke_time = Some(std::time::Instant::now());
+    }
+
+    /// Mark address fields as needing parsing (debounced)
+    pub fn mark_address_field_dirty(&mut self) {
+        self.address_fields_dirty = true;
+    }
+
+    /// Parse address fields if they are dirty and enough time has passed
+    pub fn update_address_fields(&mut self) {
+        if !self.address_fields_dirty {
+            return;
+        }
+
+        // Only parse if enough time has passed since last keystroke (debounced)
+        if let Some(last_time) = self.last_keystroke_time {
+            if last_time.elapsed() < std::time::Duration::from_millis(300) {
+                return; // Too soon, wait for user to finish typing
+            }
+        }
+
+        // Parse all address fields
+        self.parse_to_field();
+        self.parse_cc_field();
+        self.parse_bcc_field();
+        
+        self.address_fields_dirty = false;
+    }
+
+    /// Parse To field addresses
+    fn parse_to_field(&mut self) {
+        self.compose_email.to.clear();
+        for addr in self.compose_to_text.split(',') {
+            let addr = addr.trim();
+            if !addr.is_empty() {
+                self.compose_email.to.push(crate::email::EmailAddress {
+                    name: None,
+                    address: addr.to_string(),
+                });
+            }
+        }
+    }
+
+    /// Parse CC field addresses
+    fn parse_cc_field(&mut self) {
+        self.compose_email.cc.clear();
+        for addr in self.compose_cc_text.split(',') {
+            let addr = addr.trim();
+            if !addr.is_empty() {
+                self.compose_email.cc.push(crate::email::EmailAddress {
+                    name: None,
+                    address: addr.to_string(),
+                });
+            }
+        }
+    }
+
+    /// Parse BCC field addresses
+    fn parse_bcc_field(&mut self) {
+        self.compose_email.bcc.clear();
+        for addr in self.compose_bcc_text.split(',') {
+            let addr = addr.trim();
+            if !addr.is_empty() {
+                self.compose_email.bcc.push(crate::email::EmailAddress {
+                    name: None,
+                    address: addr.to_string(),
+                });
+            }
+        }
+    }
+
+    /// Check if enough time has passed since last keystroke to run spell check
+    pub fn should_run_spell_check(&self) -> bool {
+        if let Some(last_time) = self.last_keystroke_time {
+            // Only run spell check if 500ms have passed since last keystroke
+            last_time.elapsed() >= std::time::Duration::from_millis(500)
+        } else {
+            true // Run spell check if no keystroke time recorded
+        }
+    }
+
+    /// Check spelling incrementally - only check current word or changed parts
     pub fn check_spelling(&mut self) {
         if !self.spell_check_enabled {
             self.spell_errors.clear();
             return;
         }
 
-        if let Some(ref checker) = self.spell_checker {
-            let config = crate::spellcheck::SpellCheckConfig::default();
+        // Skip spell checking if not enough time has passed since last keystroke
+        if !self.should_run_spell_check() {
+            log::debug!("Skipping spell check - too soon after keystroke");
+            return;
+        }
+
+        let config = crate::spellcheck::SpellCheckConfig::default();
+        
+        let text = match self.compose_field {
+            ComposeField::Subject => {
+                self.compose_email.subject.clone()
+            },
+            ComposeField::Body => {
+                if let Some(ref body) = self.compose_email.body_text {
+                    body.clone()
+                } else {
+                    String::new()
+                }
+            }
+            ComposeField::To | ComposeField::Cc | ComposeField::Bcc => {
+                return; // Don't spell check email addresses
+            }
+        };
+
+        // Check if we should skip spell checking for this text change
+        if self.can_do_incremental_check(&text) {
+            // Skip checking to avoid performance issues and moving highlights
+            // Just update the last checked text without running spell check
+            self.last_checked_text = text.to_string();
+            log::debug!("Skipping spell check for minor text change");
+        } else {
+            // Do full check only for significant changes
+            log::debug!("Performing full spell check for significant text change");
+            self.check_spelling_full(&text, &config);
+        }
+    }
+
+    /// Calculate text similarity (simple ratio)
+    fn calculate_text_similarity(&self, text1: &str, text2: &str) -> f64 {
+        if text1.is_empty() && text2.is_empty() {
+            return 1.0;
+        }
+        if text1.is_empty() || text2.is_empty() {
+            return 0.0;
+        }
+        
+        let len1 = text1.len();
+        let len2 = text2.len();
+        let max_len = len1.max(len2);
+        
+        // Simple similarity based on length and common prefix
+        let common_prefix = text1.chars()
+            .zip(text2.chars())
+            .take_while(|(a, b)| a == b)
+            .count();
             
-            let text = match self.compose_field {
-                ComposeField::Subject => {
-                    log::debug!("Checking spelling for Subject: '{}'", self.compose_email.subject);
-                    &self.compose_email.subject
-                },
-                ComposeField::Body => {
-                    if let Some(ref body) = self.compose_email.body_text {
-                        log::debug!("Checking spelling for Body: '{}'", body);
-                        body
+        (common_prefix as f64) / (max_len as f64)
+    }
+
+    /// Check if we can do incremental spell checking
+    fn can_do_incremental_check(&self, current_text: &str) -> bool {
+        // Skip spell checking for small changes to avoid performance issues
+        // and moving highlights
+        
+        let text_len_diff = current_text.len() as i32 - self.last_checked_text.len() as i32;
+        
+        // Skip if text length difference is small (1-3 characters)
+        if text_len_diff.abs() <= 3 {
+            return true; // Skip checking
+        }
+        
+        // Skip if texts are very similar (small edits)
+        let similarity = self.calculate_text_similarity(current_text, &self.last_checked_text);
+        if similarity > 0.9 {
+            return true; // Skip checking
+        }
+        
+        // Do full check for significant changes
+        false
+    }
+
+    /// Adjust positions of existing spell errors when text changes
+    fn adjust_error_positions(&mut self, text_len_diff: i32, change_position: usize) {
+        if text_len_diff == 0 {
+            return; // No change in text length
+        }
+        
+        for error in &mut self.spell_errors {
+            // Only adjust errors that come after the change position
+            if error.position > change_position {
+                if text_len_diff > 0 {
+                    // Text was added, shift positions forward
+                    error.position = error.position.saturating_add(text_len_diff as usize);
+                } else {
+                    // Text was removed, shift positions backward
+                    let reduction = (-text_len_diff) as usize;
+                    if error.position >= change_position + reduction {
+                        error.position = error.position.saturating_sub(reduction);
                     } else {
-                        log::debug!("Body is empty, no spell checking needed");
-                        ""
+                        // Error position would be invalid, remove it
+                        error.position = change_position;
                     }
                 }
-                ComposeField::To | ComposeField::Cc | ComposeField::Bcc => {
-                    log::debug!("Skipping spell check for email address fields");
-                    return; // Don't spell check email addresses
-                }
-            };
-
-            let errors = checker.check_text(text, &config);
-            log::debug!("Spell check complete. Found {} errors", errors.len());
-            self.spell_errors = errors;
+            }
         }
+        
+        // Remove any errors with invalid positions
+        let text_len = self.last_checked_text.len();
+        self.spell_errors.retain(|error| {
+            error.position < text_len && 
+            error.position + error.word.len() <= text_len
+        });
+    }
+
+    /// Full spell check - check entire text
+    fn check_spelling_full(&mut self, text: &str, config: &crate::spellcheck::SpellCheckConfig) {
+        if let Some(ref checker) = self.spell_checker {
+            log::debug!("Doing full spell check for text: '{}'", text);
+            let errors = checker.check_text(text, config);
+            log::debug!("Full spell check complete. Found {} errors", errors.len());
+            self.spell_errors = errors;
+            self.last_checked_text = text.to_string();
+            self.last_cursor_word_pos = None;
+        }
+    }
+
+    /// Find word at cursor position
+    fn find_word_at_cursor(&self, text: &str, cursor_pos: usize) -> Option<(usize, usize, String)> {
+        if cursor_pos > text.len() {
+            return None;
+        }
+        
+        // Find word boundaries around cursor
+        let mut word_start = cursor_pos;
+        let mut word_end = cursor_pos;
+        
+        let chars: Vec<char> = text.chars().collect();
+        
+        // Find start of word (go backwards)
+        while word_start > 0 {
+            let ch = chars.get(word_start.saturating_sub(1))?;
+            if ch.is_alphabetic() || *ch == '\'' || *ch == '-' {
+                word_start -= 1;
+            } else {
+                break;
+            }
+        }
+        
+        // Find end of word (go forwards)
+        while word_end < chars.len() {
+            let ch = chars.get(word_end)?;
+            if ch.is_alphabetic() || *ch == '\'' || *ch == '-' {
+                word_end += 1;
+            } else {
+                break;
+            }
+        }
+        
+        if word_start == word_end {
+            return None;
+        }
+        
+        let word: String = chars[word_start..word_end].iter().collect();
+        if word.trim().is_empty() {
+            return None;
+        }
+        
+        Some((word_start, word_end, word))
+    }
+
+    /// Check if word should be skipped (simple version)
+    fn should_skip_word(&self, word: &str) -> bool {
+        // Skip very short words, numbers, etc.
+        if word.len() < 2 {
+            return true;
+        }
+        
+        // Skip if it's all numbers
+        if word.chars().all(|c| c.is_numeric()) {
+            return true;
+        }
+        
+        // Skip if it's all uppercase (might be acronym)
+        if word.len() < 4 && word.chars().all(|c| c.is_uppercase()) {
+            return true;
+        }
+        
+        false
     }
     
     /// Request async grammar check of current compose field
@@ -479,7 +755,7 @@ impl App {
     pub fn toggle_spell_check(&mut self) {
         self.spell_check_enabled = !self.spell_check_enabled;
         if self.spell_check_enabled {
-            self.check_spelling();
+            self.force_spell_check();
             self.show_info("Spell checking enabled");
         } else {
             self.spell_errors.clear();
@@ -582,8 +858,8 @@ impl App {
             }
             
             self.show_spell_suggestions = false;
-            self.check_spelling(); // Recheck after replacement
-            self.request_grammar_check(); // Also recheck grammar asynchronously
+            self.force_spell_check(); // Recheck after replacement
+            // Grammar check only runs manually (Alt+T)
             self.show_info(&format!("Replaced '{}' with '{}'", original_word, suggestion));
         }
     }
@@ -637,8 +913,8 @@ impl App {
             }
             
             self.show_grammar_suggestions = false;
-            self.check_spelling(); // Recheck spelling
-            self.request_grammar_check(); // Recheck grammar asynchronously
+            self.force_spell_check(); // Recheck spelling
+            // Grammar check only runs manually (Alt+T)
             self.show_info(&format!("Replaced '{}' with '{}'", original_text, suggestion));
         }
     }
@@ -663,7 +939,7 @@ impl App {
         if let Some(word) = word_to_add {
             if let Some(ref mut checker) = self.spell_checker {
                 checker.add_to_personal_dictionary(&word);
-                self.check_spelling(); // Recheck after adding to dictionary
+                self.force_spell_check(); // Recheck after adding to dictionary
                 self.show_info(&format!("Added '{}' to personal dictionary", word));
             }
         } else {
@@ -993,7 +1269,11 @@ impl App {
         if let Some((account_idx, folder_path)) = self.get_selected_folder_info() {
             self.load_emails_for_account_folder(account_idx, &folder_path)
         } else {
-            Ok(()) // No folder selected
+            // Fallback: use current account and selected_folder field
+            debug_log("get_selected_folder_info() returned None, using fallback");
+            let account_idx = self.current_account_idx;
+            let folder = self.selected_folder.clone();
+            self.load_emails_for_account_folder(account_idx, &folder)
         }
     }
 
@@ -1081,22 +1361,48 @@ impl App {
             folder
         ));
         
-        // Fetch emails from IMAP server (this will sync and update the database)
-        match client.fetch_emails(folder, 0) { // 0 means fetch all emails
-            Ok(synced_emails) => {
+        // Use smart sync strategy to efficiently sync only what's needed
+        match client.smart_sync(folder) {
+            Ok(new_emails) => {
                 debug_log(&format!(
-                    "Successfully synced {} emails from IMAP server for {}/{}",
-                    synced_emails.len(),
+                    "Smart sync completed: {} new/updated emails for {}/{}",
+                    new_emails.len(),
                     account_data.email,
                     folder
                 ));
                 
-                if let Some(account_data) = self.accounts.get_mut(&account_idx) {
-                    account_data.emails = synced_emails;
+                // Load recent emails from database for UI display
+                let cache_dir = format!("{}/.cache/tuimail/{}", 
+                    dirs::home_dir().unwrap_or_default().display(), 
+                    account_data.email.replace('@', "_at_").replace('.', "_"));
+                let db_path = std::path::PathBuf::from(&cache_dir).join("emails.db");
+                
+                let account_database = crate::database::EmailDatabase::new(&db_path)
+                    .map_err(|e| AppError::EmailError(crate::email::EmailError::ImapError(
+                        format!("Failed to open account database: {}", e)
+                    )))?;
+                
+                // Get recent emails for UI display (limit to reasonable number)
+                match account_database.get_recent_emails(&account_data.email, folder, 5000) {
+                    Ok(recent_emails) => {
+                        if let Some(account_data) = self.accounts.get_mut(&account_idx) {
+                            account_data.emails = recent_emails;
 
-                    // Update legacy fields for backward compatibility
-                    if account_idx == self.current_account_idx {
-                        self.emails = account_data.emails.clone();
+                            // Update legacy fields for backward compatibility
+                            if account_idx == self.current_account_idx {
+                                self.emails = account_data.emails.clone();
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        debug_log(&format!("Failed to load recent emails from database: {}", e));
+                        // Fallback: use only the newly synced emails
+                        if let Some(account_data) = self.accounts.get_mut(&account_idx) {
+                            account_data.emails = new_emails;
+                            if account_idx == self.current_account_idx {
+                                self.emails = account_data.emails.clone();
+                            }
+                        }
                     }
                 }
 
@@ -1197,6 +1503,27 @@ impl App {
         Ok(())
     }
 
+    /// Queue an email operation for background processing with explicit folder
+    pub fn queue_email_operation_for_folder(&mut self, operation_type: &str, email_uid: u32, folder: &str, target_folder: Option<&str>) -> AppResult<()> {
+        let account_email = &self.config.accounts[self.current_account_idx].email;
+        
+        // Queue the operation in database
+        self.database.queue_email_operation(
+            account_email,
+            operation_type,
+            email_uid,
+            folder,
+            target_folder
+        )?;
+        
+        debug_log(&format!(
+            "Queued {} operation for email {} in {}/{}",
+            operation_type, email_uid, account_email, folder
+        ));
+        
+        Ok(())
+    }
+
     /// Queue an email operation for background processing
     pub fn queue_email_operation(&mut self, operation_type: &str, email_uid: u32, target_folder: Option<&str>) -> AppResult<()> {
         if let Some((account_idx, folder_path)) = self.get_selected_folder_info() {
@@ -1277,7 +1604,24 @@ impl App {
                 let email = &self.emails[idx];
                 if !email.seen {
                     let email_uid: u32 = email.id.parse().unwrap_or(0);
-                    self.queue_email_operation("mark_read", email_uid, None)?;
+                    let email_folder = email.folder.clone();
+                    let account_email = self.config.accounts[self.current_account_idx].email.clone();
+                    
+                    // 1. Queue the operation for server sync (use email's folder directly)
+                    self.queue_email_operation_for_folder("mark_read", email_uid, &email_folder, None)?;
+                    
+                    // 2. Update local database immediately
+                    if let Err(e) = self.database.update_email_seen_status(&account_email, &email_folder, email_uid, true) {
+                        debug_log(&format!("Failed to update local database: {}", e));
+                    }
+                    
+                    // 3. Update UI state immediately
+                    self.emails[idx].seen = true;
+                    
+                    debug_log(&format!("Marked email UID {} as read locally and queued server sync", email_uid));
+                    
+                    // 4. Trigger immediate background processing for responsiveness
+                    self.trigger_immediate_sync()?;
                 }
             }
         }
@@ -1291,7 +1635,24 @@ impl App {
                 let email = &self.emails[idx];
                 if email.seen {
                     let email_uid: u32 = email.id.parse().unwrap_or(0);
-                    self.queue_email_operation("mark_unread", email_uid, None)?;
+                    let email_folder = email.folder.clone();
+                    let account_email = self.config.accounts[self.current_account_idx].email.clone();
+                    
+                    // 1. Queue the operation for server sync (use email's folder directly)
+                    self.queue_email_operation_for_folder("mark_unread", email_uid, &email_folder, None)?;
+                    
+                    // 2. Update local database immediately
+                    if let Err(e) = self.database.update_email_seen_status(&account_email, &email_folder, email_uid, false) {
+                        debug_log(&format!("Failed to update local database: {}", e));
+                    }
+                    
+                    // 3. Update UI state immediately
+                    self.emails[idx].seen = false;
+                    
+                    debug_log(&format!("Marked email UID {} as unread locally and queued server sync", email_uid));
+                    
+                    // 4. Trigger immediate background processing for responsiveness
+                    self.trigger_immediate_sync()?;
                 }
             }
         }
@@ -1310,7 +1671,13 @@ impl App {
         Ok(())
     }
 
-    /// Reset sync state to force full re-sync of current folder
+    /// Trigger immediate background sync for pending operations
+    pub fn trigger_immediate_sync(&mut self) -> AppResult<()> {
+        // Signal the background thread to process operations immediately
+        // We'll use a simple approach: reduce the sleep time temporarily
+        debug_log("Triggering immediate sync for pending operations");
+        Ok(())
+    }
     pub fn reset_sync_state(&mut self) -> AppResult<()> {
         if let Some(account_data) = self.accounts.get(&self.current_account_idx) {
             // Clear database entries for this folder
@@ -1357,20 +1724,170 @@ impl App {
             
             // Initialize email clients for each account
             for account in &config.accounts {
+                debug_log(&format!("🔧 Initializing email client for {}", account.email));
+                
                 // Create credentials manager
                 let credentials = match crate::credentials::SecureCredentials::new() {
-                    Ok(creds) => creds,
+                    Ok(creds) => {
+                        debug_log(&format!("✅ Credentials created for {}", account.email));
+                        creds
+                    }
                     Err(e) => {
-                        debug_log(&format!("Failed to create credentials for {}: {}", account.email, e));
+                        debug_log(&format!("❌ Failed to create credentials for {}: {}", account.email, e));
                         continue;
                     }
                 };
                 let client = EmailClient::new(account.clone(), credentials);
+                
+                // Test the connection
+                debug_log(&format!("🔌 Testing IMAP connection for {}", account.email));
+                match client.list_folders() {
+                    Ok(folders) => {
+                        debug_log(&format!("✅ IMAP connection test successful for {} - found {} folders", account.email, folders.len()));
+                    }
+                    Err(e) => {
+                        debug_log(&format!("⚠️  IMAP connection test failed for {}: {} (will retry during operations)", account.email, e));
+                    }
+                }
+                
                 email_clients.insert(account.email.clone(), client);
             }
             
             // Run sync loop (no need for async since methods are sync)
             while running_flag.load(Ordering::Relaxed) {
+                // Process queued operations first
+                match database.get_pending_operations() {
+                    Ok(operations) => {
+                        for (op_id, account_email, operation_type, email_uid, folder, target_folder) in operations {
+                            if !running_flag.load(Ordering::Relaxed) {
+                                break;
+                            }
+                            
+                            if let Some(client) = email_clients.get(&account_email) {
+                                debug_log(&format!("🔄 Processing {} operation for email {} in {}/{}", 
+                                    operation_type, email_uid, account_email, folder));
+                                
+                                let result = match operation_type.as_str() {
+                                    "mark_read" => {
+                                        // Create a temporary email object for the operation
+                                        let temp_email = crate::email::Email {
+                                            id: email_uid.to_string(),
+                                            folder: folder.clone(),
+                                            subject: String::new(),
+                                            from: Vec::new(),
+                                            to: Vec::new(),
+                                            cc: Vec::new(),
+                                            bcc: Vec::new(),
+                                            date: chrono::Local::now(),
+                                            body_text: None,
+                                            body_html: None,
+                                            seen: false,
+                                            attachments: Vec::new(),
+                                            flags: Vec::new(),
+                                            headers: std::collections::HashMap::new(),
+                                        };
+                                        
+                                        match client.mark_as_read(&temp_email) {
+                                            Ok(_) => {
+                                                debug_log(&format!("✅ IMAP mark_as_read succeeded for email {}", email_uid));
+                                                // Update database
+                                                match database.update_email_seen_status(&account_email, &folder, email_uid, true) {
+                                                    Ok(_) => {
+                                                        debug_log(&format!("✅ Database update succeeded for email {}", email_uid));
+                                                        Ok(())
+                                                    }
+                                                    Err(e) => {
+                                                        debug_log(&format!("❌ Database update failed for email {}: {}", email_uid, e));
+                                                        Err(e)
+                                                    }
+                                                }
+                                            }
+                                            Err(e) => {
+                                                debug_log(&format!("❌ IMAP mark_as_read FAILED for email {}: {}", email_uid, e));
+                                                debug_log(&format!("❌ IMAP Error details: {:?}", e));
+                                                Err(e.into())
+                                            }
+                                        }
+                                    }
+                                    "mark_unread" => {
+                                        let temp_email = crate::email::Email {
+                                            id: email_uid.to_string(),
+                                            folder: folder.clone(),
+                                            subject: String::new(),
+                                            from: Vec::new(),
+                                            to: Vec::new(),
+                                            cc: Vec::new(),
+                                            bcc: Vec::new(),
+                                            date: chrono::Local::now(),
+                                            body_text: None,
+                                            body_html: None,
+                                            seen: true,
+                                            attachments: Vec::new(),
+                                            flags: Vec::new(),
+                                            headers: std::collections::HashMap::new(),
+                                        };
+                                        
+                                        match client.mark_as_unread(&temp_email) {
+                                            Ok(_) => {
+                                                database.update_email_seen_status(&account_email, &folder, email_uid, false)
+                                            }
+                                            Err(e) => Err(e.into())
+                                        }
+                                    }
+                                    "delete" => {
+                                        let temp_email = crate::email::Email {
+                                            id: email_uid.to_string(),
+                                            folder: folder.clone(),
+                                            subject: String::new(),
+                                            from: Vec::new(),
+                                            to: Vec::new(),
+                                            cc: Vec::new(),
+                                            bcc: Vec::new(),
+                                            date: chrono::Local::now(),
+                                            body_text: None,
+                                            body_html: None,
+                                            seen: false,
+                                            attachments: Vec::new(),
+                                            flags: Vec::new(),
+                                            headers: std::collections::HashMap::new(),
+                                        };
+                                        
+                                        match client.delete_email(&temp_email) {
+                                            Ok(_) => {
+                                                database.delete_email(&account_email, &folder, email_uid)
+                                            }
+                                            Err(e) => Err(e.into())
+                                        }
+                                    }
+                                    _ => {
+                                        debug_log(&format!("Unknown operation type: {}", operation_type));
+                                        Ok(())
+                                    }
+                                };
+                                
+                                match result {
+                                    Ok(_) => {
+                                        debug_log(&format!("✅ Successfully processed {} operation for email {}", operation_type, email_uid));
+                                        if let Err(e) = database.mark_operation_processed(op_id) {
+                                            debug_log(&format!("❌ Failed to mark operation as processed: {}", e));
+                                        }
+                                    }
+                                    Err(e) => {
+                                        debug_log(&format!("❌ FAILED to process {} operation for email {}: {}", operation_type, email_uid, e));
+                                        debug_log(&format!("❌ Error details: {:?}", e));
+                                        // Don't mark as processed so it will be retried
+                                    }
+                                }
+                            } else {
+                                debug_log(&format!("❌ No email client found for account: {}", account_email));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        debug_log(&format!("Failed to get pending operations: {}", e));
+                    }
+                }
+                
                 // Sync all accounts
                 for account in &config.accounts {
                     if !running_flag.load(Ordering::Relaxed) {
@@ -1406,12 +1923,123 @@ impl App {
                     }
                 }
                 
-                // Sleep for sync interval (30 seconds)
-                for _ in 0..30 {
+                // Sleep for shorter intervals to check operations more frequently
+                // Check operations every 2 seconds, full sync every 30 seconds
+                for i in 0..15 {
                     if !running_flag.load(Ordering::Relaxed) {
                         break;
                     }
-                    std::thread::sleep(Duration::from_secs(1));
+                    std::thread::sleep(Duration::from_secs(2));
+                    
+                    // Check for pending operations every 2 seconds
+                    if i < 14 { // Don't check on the last iteration to avoid duplicate processing
+                        match database.get_pending_operations() {
+                            Ok(operations) => {
+                                if !operations.is_empty() {
+                                    debug_log(&format!("Quick check: Found {} pending operations", operations.len()));
+                                    
+                                    for (op_id, account_email, operation_type, email_uid, folder, _target_folder) in operations {
+                                        if !running_flag.load(Ordering::Relaxed) {
+                                            break;
+                                        }
+                                        
+                                        if let Some(client) = email_clients.get(&account_email) {
+                                            debug_log(&format!("Quick processing {} operation for email {} in {}/{}", 
+                                                operation_type, email_uid, account_email, folder));
+                                            
+                                            let result = match operation_type.as_str() {
+                                                "mark_read" => {
+                                                    let temp_email = crate::email::Email {
+                                                        id: email_uid.to_string(),
+                                                        folder: folder.clone(),
+                                                        subject: String::new(),
+                                                        from: Vec::new(),
+                                                        to: Vec::new(),
+                                                        cc: Vec::new(),
+                                                        bcc: Vec::new(),
+                                                        date: chrono::Local::now(),
+                                                        body_text: None,
+                                                        body_html: None,
+                                                        seen: false,
+                                                        attachments: Vec::new(),
+                                                        flags: Vec::new(),
+                                                        headers: std::collections::HashMap::new(),
+                                                    };
+                                                    
+                                                    match client.mark_as_read(&temp_email) {
+                                                        Ok(_) => database.update_email_seen_status(&account_email, &folder, email_uid, true),
+                                                        Err(e) => Err(e.into())
+                                                    }
+                                                }
+                                                "mark_unread" => {
+                                                    let temp_email = crate::email::Email {
+                                                        id: email_uid.to_string(),
+                                                        folder: folder.clone(),
+                                                        subject: String::new(),
+                                                        from: Vec::new(),
+                                                        to: Vec::new(),
+                                                        cc: Vec::new(),
+                                                        bcc: Vec::new(),
+                                                        date: chrono::Local::now(),
+                                                        body_text: None,
+                                                        body_html: None,
+                                                        seen: true,
+                                                        attachments: Vec::new(),
+                                                        flags: Vec::new(),
+                                                        headers: std::collections::HashMap::new(),
+                                                    };
+                                                    
+                                                    match client.mark_as_unread(&temp_email) {
+                                                        Ok(_) => database.update_email_seen_status(&account_email, &folder, email_uid, false),
+                                                        Err(e) => Err(e.into())
+                                                    }
+                                                }
+                                                "delete" => {
+                                                    let temp_email = crate::email::Email {
+                                                        id: email_uid.to_string(),
+                                                        folder: folder.clone(),
+                                                        subject: String::new(),
+                                                        from: Vec::new(),
+                                                        to: Vec::new(),
+                                                        cc: Vec::new(),
+                                                        bcc: Vec::new(),
+                                                        date: chrono::Local::now(),
+                                                        body_text: None,
+                                                        body_html: None,
+                                                        seen: false,
+                                                        attachments: Vec::new(),
+                                                        flags: Vec::new(),
+                                                        headers: std::collections::HashMap::new(),
+                                                    };
+                                                    
+                                                    match client.delete_email(&temp_email) {
+                                                        Ok(_) => database.delete_email(&account_email, &folder, email_uid),
+                                                        Err(e) => Err(e.into())
+                                                    }
+                                                }
+                                                _ => Ok(())
+                                            };
+                                            
+                                            match result {
+                                                Ok(_) => {
+                                                    debug_log(&format!("Quick processed {} operation for email {}", operation_type, email_uid));
+                                                    if let Err(e) = database.mark_operation_processed(op_id) {
+                                                        debug_log(&format!("Failed to mark operation as processed: {}", e));
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    debug_log(&format!("Quick processing failed for {} operation: {}", operation_type, e));
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                debug_log(&format!("Failed to get pending operations in quick check: {}", e));
+                            }
+                        }
+                    }
                 }
             }
 
@@ -1452,71 +2080,114 @@ impl App {
 
     /// Refresh emails from database (called periodically) - optimized with sync tracker
     pub fn refresh_emails_from_database(&mut self) -> AppResult<()> {
-        if let Some((account_idx, folder_path)) = self.get_selected_folder_info() {
-            let account_email = if let Some(account_data) = self.accounts.get(&account_idx) {
-                account_data.account.email.clone()
-            } else {
-                return Ok(());
-            };
-
-            // Get UI's last known timestamp for this account/folder
-            let ui_key = format!("{}:{}", account_email, folder_path);
-            let ui_timestamp = self.ui_timestamps.get(&ui_key)
-                .copied()
-                .unwrap_or_else(|| chrono::DateTime::from_timestamp(0, 0).unwrap_or_else(chrono::Utc::now));
-
-            // Check if there are potentially new emails using the sync tracker
-            if !has_new_emails_since_global(&account_email, &folder_path, ui_timestamp) {
-                // No new emails detected, skip expensive database queries
-                return Ok(());
+        let (account_idx, folder_path) = if let Some((idx, path)) = self.get_selected_folder_info() {
+            (idx, path)
+        } else {
+            // Fallback: use current account and selected_folder field
+            debug_log(&format!("refresh_emails_from_database: get_selected_folder_info() returned None, using fallback. selected_folder='{}'", self.selected_folder));
+            
+            // Safety check: ensure selected_folder is valid
+            let mut folder = self.selected_folder.clone();
+            if folder.is_empty() || folder == "Queue" {
+                folder = "INBOX".to_string();
+                debug_log(&format!("Invalid selected_folder '{}', using INBOX instead", self.selected_folder));
+                self.selected_folder = folder.clone();
             }
+            
+            (self.current_account_idx, folder)
+        };
+        
+        let account_email = if let Some(account_data) = self.accounts.get(&account_idx) {
+            account_data.account.email.clone()
+        } else {
+            return Ok(());
+        };
 
-            debug_log(&format!(
-                "Sync tracker indicates new emails for {}/{}, checking database",
-                account_email, folder_path
-            ));
+        // Get UI's last known timestamp for this account/folder
+        let ui_key = format!("{}:{}", account_email, folder_path);
+        let ui_timestamp = self.ui_timestamps.get(&ui_key)
+            .copied()
+            .unwrap_or_else(|| chrono::DateTime::from_timestamp(0, 0).unwrap_or_else(chrono::Utc::now));
 
-            // Get emails that arrived after our UI timestamp
-            match self.database.get_emails_since_timestamp(&account_email, &folder_path, ui_timestamp) {
-                Ok(new_emails) if !new_emails.is_empty() => {
-                    debug_log(&format!(
-                        "Found {} new emails for {}/{} since {}",
-                        new_emails.len(), account_email, folder_path, ui_timestamp
-                    ));
-                    
-                    // Merge new emails with existing ones
+        // Always check if UI is empty first, regardless of sync tracker
+        let ui_is_empty = if let Some(account_data) = self.accounts.get(&account_idx) {
+            account_data.emails.is_empty()
+        } else {
+            true
+        };
+
+        if ui_is_empty {
+            // UI is empty, load recent emails from database
+            debug_log(&format!("UI is empty, loading recent emails from database for {}/{}", account_email, folder_path));
+            match self.database.get_recent_emails(&account_email, &folder_path, 5000) {
+                Ok(existing_emails) => {
+                    debug_log(&format!("Loaded {} existing emails for empty UI", existing_emails.len()));
                     if let Some(account_data) = self.accounts.get_mut(&account_idx) {
-                        // Add new emails to the beginning (most recent first)
-                        let mut updated_emails = new_emails;
-                        updated_emails.extend(account_data.emails.clone());
-                        
-                        // Remove duplicates based on ID
-                        updated_emails.sort_by(|a, b| b.date.cmp(&a.date)); // Sort by date descending
-                        updated_emails.dedup_by(|a, b| a.id == b.id);
-                        
-                        account_data.emails = updated_emails;
-                        
-                        // Update UI emails if this is the current account
+                        account_data.emails = existing_emails;
                         if account_idx == self.current_account_idx {
                             self.emails = account_data.emails.clone();
-                        }
-                        
-                        // Update UI timestamp to the latest email timestamp
-                        if let Some(latest_email) = account_data.emails.first() {
-                            let email_time = latest_email.date.with_timezone(&chrono::Utc);
-                            self.ui_timestamps.insert(ui_key, email_time);
+                            debug_log(&format!("Updated UI emails: {} emails now visible", self.emails.len()));
                         }
                     }
-                }
-                Ok(_) => {
-                    // No new emails, but update UI timestamp to current sync timestamp
-                    if let Some(sync_timestamp) = get_global_sync_timestamp(&account_email, &folder_path) {
-                        self.ui_timestamps.insert(ui_key, sync_timestamp);
-                    }
+                    return Ok(());
                 }
                 Err(e) => {
-                    debug_log(&format!("Error checking for new emails: {}", e));
+                    debug_log(&format!("Error loading existing emails: {}", e));
                 }
+            }
+        }
+
+        // Check if there are potentially new emails using the sync tracker
+        if !has_new_emails_since_global(&account_email, &folder_path, ui_timestamp) {
+            // No new emails detected, skip expensive database queries
+            return Ok(());
+        }
+
+        debug_log(&format!(
+            "Sync tracker indicates new emails for {}/{}, checking database",
+            account_email, folder_path
+        ));
+
+        // Get emails that arrived after our UI timestamp
+        match self.database.get_emails_since_timestamp(&account_email, &folder_path, ui_timestamp) {
+            Ok(new_emails) if !new_emails.is_empty() => {
+                debug_log(&format!(
+                    "Found {} new emails for {}/{} since {}",
+                    new_emails.len(), account_email, folder_path, ui_timestamp
+                ));
+                
+                // Merge new emails with existing ones
+                if let Some(account_data) = self.accounts.get_mut(&account_idx) {
+                    // Add new emails to the beginning (most recent first)
+                    let mut updated_emails = new_emails;
+                    updated_emails.extend(account_data.emails.clone());
+                    
+                    // Remove duplicates based on ID
+                    updated_emails.sort_by(|a, b| b.date.cmp(&a.date)); // Sort by date descending
+                    updated_emails.dedup_by(|a, b| a.id == b.id);
+                    
+                    account_data.emails = updated_emails;
+                    
+                    // Update UI emails if this is the current account
+                    if account_idx == self.current_account_idx {
+                        self.emails = account_data.emails.clone();
+                    }
+                    
+                    // Update UI timestamp to the latest email timestamp
+                    if let Some(latest_email) = account_data.emails.first() {
+                        let email_time = latest_email.date.with_timezone(&chrono::Utc);
+                        self.ui_timestamps.insert(ui_key, email_time);
+                    }
+                }
+            }
+            Ok(_) => {
+                // No new emails, but update UI timestamp to current sync timestamp
+                if let Some(sync_timestamp) = get_global_sync_timestamp(&account_email, &folder_path) {
+                    self.ui_timestamps.insert(ui_key, sync_timestamp);
+                }
+            }
+            Err(e) => {
+                debug_log(&format!("Error checking for new emails: {}", e));
             }
         }
         
@@ -1605,10 +2276,15 @@ impl App {
         if let Some(account_data) = self.accounts.get(&self.current_account_idx) {
             if !account_data.folders.is_empty() {
                 let folder = account_data.folders[0].clone();
+                debug_log(&format!("Setting selected_folder from '{}' to '{}'", self.selected_folder, folder));
+                self.selected_folder = folder.clone(); // Update selected folder
+                debug_log(&format!("Loading initial emails for folder: {}", folder));
                 if let Err(e) =
                     self.load_emails_for_account_folder(self.current_account_idx, &folder)
                 {
                     self.show_error(&format!("Failed to load emails: {}", e));
+                } else {
+                    debug_log(&format!("Successfully loaded initial emails for folder: {}", folder));
                 }
             }
         }
@@ -1667,9 +2343,9 @@ impl App {
                 self.compose_to_text = String::new();
                 self.compose_cc_text = String::new();
                 self.compose_bcc_text = String::new();
-                // Initialize spell and grammar checking for new compose
-                self.check_spelling();
-                self.request_grammar_check();
+                // Initialize spell checking for new compose
+                self.force_spell_check();
+                // Grammar check only runs manually (Alt+T)
                 Ok(())
             }
             KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -1867,6 +2543,17 @@ impl App {
                 Ok(())
             }
             KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::ALT) => {
+                // Manual grammar check - run it now
+                if self.grammar_check_enabled {
+                    self.request_grammar_check();
+                    self.show_info("Grammar check requested...");
+                } else {
+                    self.show_info("Grammar checking is disabled. Press Alt+R to enable.");
+                }
+                Ok(())
+            }
+            KeyCode::Char('g') if key.modifiers.contains(KeyModifiers::ALT) && key.modifiers.contains(KeyModifiers::SHIFT) => {
+                // Show grammar suggestions at cursor
                 self.show_grammar_suggestions_at_cursor();
                 Ok(())
             }
@@ -1895,7 +2582,7 @@ impl App {
                     ComposeField::Body => 0,                        // Beginning of Body for replies
                 };
                 // Trigger spell check when switching to a new field
-                self.check_spelling();
+                self.force_spell_check();
                 Ok(())
             }
             KeyCode::BackTab => {
@@ -1916,7 +2603,7 @@ impl App {
                     ComposeField::Body => 0,                        // Beginning of Body for replies
                 };
                 // Trigger spell check when switching to a new field
-                self.check_spelling();
+                self.force_spell_check();
                 Ok(())
             }
             KeyCode::Up => {
@@ -1984,17 +2671,8 @@ impl App {
                             self.compose_cursor_pos = self.compose_to_text.len();
                         }
 
-                        // Parse the to field and update compose_email.to
-                        self.compose_email.to.clear();
-                        for addr in self.compose_to_text.split(',') {
-                            let addr = addr.trim();
-                            if !addr.is_empty() {
-                                self.compose_email.to.push(crate::email::EmailAddress {
-                                    name: None,
-                                    address: addr.to_string(),
-                                });
-                            }
-                        }
+                        // Mark for delayed parsing instead of immediate parsing
+                        self.mark_address_field_dirty();
                     }
                     ComposeField::Cc => {
                         // Insert character at cursor position in CC field
@@ -2006,17 +2684,8 @@ impl App {
                             self.compose_cursor_pos = self.compose_cc_text.len();
                         }
 
-                        // Parse the cc field and update compose_email.cc
-                        self.compose_email.cc.clear();
-                        for addr in self.compose_cc_text.split(',') {
-                            let addr = addr.trim();
-                            if !addr.is_empty() {
-                                self.compose_email.cc.push(crate::email::EmailAddress {
-                                    name: None,
-                                    address: addr.to_string(),
-                                });
-                            }
-                        }
+                        // Mark for delayed parsing instead of immediate parsing
+                        self.mark_address_field_dirty();
                     }
                     ComposeField::Bcc => {
                         // Insert character at cursor position in BCC field
@@ -2028,23 +2697,14 @@ impl App {
                             self.compose_cursor_pos = self.compose_bcc_text.len();
                         }
 
-                        // Parse the bcc field and update compose_email.bcc
-                        self.compose_email.bcc.clear();
-                        for addr in self.compose_bcc_text.split(',') {
-                            let addr = addr.trim();
-                            if !addr.is_empty() {
-                                self.compose_email.bcc.push(crate::email::EmailAddress {
-                                    name: None,
-                                    address: addr.to_string(),
-                                });
-                            }
-                        }
+                        // Mark for delayed parsing instead of immediate parsing
+                        self.mark_address_field_dirty();
                     }
                     ComposeField::Subject => {
                         self.compose_email.subject.push(c);
-                        // Trigger spell and grammar check for subject
-                        self.check_spelling();
-                        self.request_grammar_check();
+                        // Mark keystroke for debounced spell checking (no immediate check)
+                        self.mark_keystroke();
+                        // Grammar check only runs manually (Alt+T)
                     }
                     ComposeField::Body => {
                         if let Some(ref mut body) = self.compose_email.body_text {
@@ -2056,9 +2716,9 @@ impl App {
                             self.compose_email.body_text = Some(c.to_string());
                             self.compose_cursor_pos = 1;
                         }
-                        // Trigger spell and grammar check for body on any character (more responsive)
-                        self.check_spelling();
-                        self.request_grammar_check();
+                        // Mark keystroke for debounced spell checking
+                        self.mark_keystroke();
+                        // Grammar check only runs manually (Alt+T)
                     }
                 }
                 Ok(())
@@ -2073,17 +2733,8 @@ impl App {
                             self.compose_to_text.remove(self.compose_cursor_pos - 1);
                             self.compose_cursor_pos -= 1;
 
-                            // Parse the to field and update compose_email.to
-                            self.compose_email.to.clear();
-                            for addr in self.compose_to_text.split(',') {
-                                let addr = addr.trim();
-                                if !addr.is_empty() {
-                                    self.compose_email.to.push(crate::email::EmailAddress {
-                                        name: None,
-                                        address: addr.to_string(),
-                                    });
-                                }
-                            }
+                            // Mark for delayed parsing instead of immediate parsing
+                            self.mark_address_field_dirty();
                         }
                     }
                     ComposeField::Cc => {
@@ -2093,17 +2744,8 @@ impl App {
                             self.compose_cc_text.remove(self.compose_cursor_pos - 1);
                             self.compose_cursor_pos -= 1;
 
-                            // Parse the cc field and update compose_email.cc
-                            self.compose_email.cc.clear();
-                            for addr in self.compose_cc_text.split(',') {
-                                let addr = addr.trim();
-                                if !addr.is_empty() {
-                                    self.compose_email.cc.push(crate::email::EmailAddress {
-                                        name: None,
-                                        address: addr.to_string(),
-                                    });
-                                }
-                            }
+                            // Mark for delayed parsing instead of immediate parsing
+                            self.mark_address_field_dirty();
                         }
                     }
                     ComposeField::Bcc => {
@@ -2113,24 +2755,15 @@ impl App {
                             self.compose_bcc_text.remove(self.compose_cursor_pos - 1);
                             self.compose_cursor_pos -= 1;
 
-                            // Parse the bcc field and update compose_email.bcc
-                            self.compose_email.bcc.clear();
-                            for addr in self.compose_bcc_text.split(',') {
-                                let addr = addr.trim();
-                                if !addr.is_empty() {
-                                    self.compose_email.bcc.push(crate::email::EmailAddress {
-                                        name: None,
-                                        address: addr.to_string(),
-                                    });
-                                }
-                            }
+                            // Mark for delayed parsing instead of immediate parsing
+                            self.mark_address_field_dirty();
                         }
                     }
                     ComposeField::Subject => {
                         self.compose_email.subject.pop();
-                        // Trigger spell and grammar check for subject
-                        self.check_spelling();
-                        self.request_grammar_check();
+                        // Mark keystroke for debounced spell checking
+                        self.mark_keystroke();
+                        // Grammar check only runs manually (Alt+T)
                     }
                     ComposeField::Body => {
                         if let Some(ref mut body) = self.compose_email.body_text {
@@ -2139,9 +2772,9 @@ impl App {
                                 body.remove(self.compose_cursor_pos - 1);
                                 self.compose_cursor_pos -= 1;
                                 
-                                // Trigger spell and grammar check after deletion
-                                self.check_spelling();
-                                self.request_grammar_check();
+                                // Mark keystroke for debounced spell checking
+                                self.mark_keystroke();
+                                // Grammar check only runs manually (Alt+T)
                             }
                         }
                     }
@@ -2157,16 +2790,16 @@ impl App {
                         body.insert(cursor_pos, '\n');
                         self.compose_cursor_pos = cursor_pos + 1;
                         
-                        // Trigger spell and grammar check after newline
-                        self.check_spelling();
-                        self.request_grammar_check();
+                        // Mark keystroke for debounced spell checking
+                        self.mark_keystroke();
+                        // Grammar check only runs manually (Alt+T)
                     } else {
                         // If body is None, create it with a newline
                         self.compose_email.body_text = Some("\n".to_string());
                         self.compose_cursor_pos = 1;
-                        // Trigger spell and grammar check for new body
-                        self.check_spelling();
-                        self.request_grammar_check();
+                        // Mark keystroke for debounced spell checking
+                        self.mark_keystroke();
+                        // Grammar check only runs manually (Alt+T)
                     }
                 }
                 Ok(())
@@ -2364,6 +2997,7 @@ impl App {
                         } => {
                             // Select folder and switch to normal mode
                             self.current_account_idx = account_index;
+                            self.selected_folder = full_path.clone(); // Update selected folder
                             self.mode = AppMode::Normal;
                             self.focus = FocusPanel::EmailList;
 

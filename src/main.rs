@@ -528,14 +528,27 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> AppRe
             last_db_poll = std::time::Instant::now();
         }
         
-        // Draw UI
-        if let Err(e) = terminal.draw(|frame| ui(frame, app)) {
-            consecutive_errors += 1;
-            if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
-                return Err(AppError::IoError(e));
-            }
-            continue;
+        // Only update spell checking in compose mode and when needed
+        if matches!(app.mode, app::AppMode::Compose) && app.should_run_spell_check() {
+            app.update_spell_check();
         }
+        
+        // Update address field parsing (debounced)
+        if matches!(app.mode, app::AppMode::Compose) {
+            app.update_address_fields();
+        }
+        
+        // DISABLED: Draw UI only if needed (optimization) - this was causing continuous redraws
+        // if app.needs_redraw {
+        //     if let Err(e) = terminal.draw(|frame| ui(frame, app)) {
+        //         consecutive_errors += 1;
+        //         if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
+        //             return Err(AppError::IoError(e));
+        //         }
+        //         continue;
+        //     }
+        //     app.needs_redraw = false; // Reset redraw flag after successful draw
+        // }
         
         // Ensure the terminal output is flushed
         io::stdout().flush().ok();
@@ -544,7 +557,7 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> AppRe
         consecutive_errors = 0;
         
         // Handle events
-        if event::poll(Duration::from_millis(100))? {
+        if event::poll(Duration::from_secs(1))? {
             if let Event::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
                     // Handle input with error recovery
@@ -559,6 +572,14 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> AppRe
                     } else {
                         // Reset error counter on successful operation
                         consecutive_errors = 0;
+                        
+                        // Draw UI only after key events
+                        if let Err(e) = terminal.draw(|frame| ui(frame, app)) {
+                            consecutive_errors += 1;
+                            if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
+                                return Err(AppError::IoError(e));
+                            }
+                        }
                     }
                     
                     // Check if we should exit
