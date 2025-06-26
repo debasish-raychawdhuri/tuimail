@@ -10,7 +10,7 @@ const ADDITIONAL_COMMON: &str = include_str!("../resources/additional-common.txt
 /// This is a basic implementation that can be extended with proper dictionary support
 pub struct SpellChecker {
     personal_dictionary: HashSet<String>,
-    common_words: HashSet<String>,
+    common_words: HashSet<String>, // Keep as HashSet for O(1) lookup
 }
 
 /// Represents a misspelled word with suggestions
@@ -147,6 +147,15 @@ impl SpellChecker {
         Ok(words)
     }
 
+    /// Get suggestions for a specific word (called only when user requests them)
+    pub fn get_suggestions_for_word(&self, word: &str, config: &SpellCheckConfig) -> Vec<String> {
+        let suggestions = self.suggest(word);
+        suggestions
+            .into_iter()
+            .take(config.max_suggestions)
+            .collect()
+    }
+
     /// Check if a word is spelled correctly
     pub fn is_correct(&self, word: &str) -> bool {
         // Skip empty words
@@ -173,57 +182,98 @@ impl SpellChecker {
 
         let mut suggestions = Vec::new();
         let word_lower = word.to_lowercase();
-        let word_len = word_lower.len();
-
-        // Strategy 1: Find exact matches with different case
-        for common_word in &self.common_words {
-            if common_word.to_lowercase() == word_lower && common_word != &word {
-                suggestions.push(common_word.clone());
-            }
-        }
-
-        // Strategy 2: Find words with high similarity (edit distance 1-2)
-        for common_word in &self.common_words {
-            if (common_word.len() as i32 - word_len as i32).abs() <= 2 {
-                let similarity = self.calculate_similarity(&word_lower, common_word);
-                if similarity >= 0.6 {
-                    if !suggestions.contains(common_word) {
-                        suggestions.push(common_word.clone());
-                    }
-                }
-            }
-        }
-
-        // Strategy 3: Common misspelling patterns
+        
+        // Quick strategy: Only check common corrections and a few similar words
+        // This is much faster than iterating through the entire dictionary
+        
+        // Strategy 1: Common misspelling patterns (fastest)
         let corrected = self.apply_common_corrections(&word_lower);
         if corrected != word_lower && self.common_words.contains(&corrected) {
-            if !suggestions.contains(&corrected) {
-                suggestions.insert(0, corrected); // Put common corrections first
-            }
+            suggestions.push(corrected);
         }
-
-        // Strategy 4: If still not enough, try prefix matching for longer words
-        if suggestions.len() < 3 && word_len >= 4 {
-            let prefix = &word_lower[..3];
-            for common_word in &self.common_words {
-                if common_word.starts_with(prefix) && !suggestions.contains(common_word) {
-                    suggestions.push(common_word.clone());
-                    if suggestions.len() >= 5 {
-                        break;
+        
+        // Strategy 2: Check a limited set of similar words (much faster)
+        // Only check words with similar length (±1 character)
+        let word_len = word_lower.len();
+        let mut checked_count = 0;
+        const MAX_CHECKS: usize = 500; // Limit to first 500 words to avoid freezing
+        
+        for common_word in &self.common_words {
+            if checked_count >= MAX_CHECKS {
+                break; // Prevent freezing on long texts
+            }
+            checked_count += 1;
+            
+            // Only check words with similar length
+            if (common_word.len() as i32 - word_len as i32).abs() <= 1 {
+                // Quick similarity check - only calculate if lengths are close
+                if self.is_similar_quick(&word_lower, common_word) {
+                    if !suggestions.contains(common_word) {
+                        suggestions.push(common_word.clone());
+                        if suggestions.len() >= 3 {
+                            break; // Stop after finding 3 good suggestions
+                        }
                     }
                 }
             }
         }
-
-        // Sort by similarity and length
-        suggestions.sort_by(|a, b| {
-            let a_sim = self.calculate_similarity(&word_lower, a);
-            let b_sim = self.calculate_similarity(&word_lower, b);
-            b_sim.partial_cmp(&a_sim).unwrap_or(std::cmp::Ordering::Equal)
-        });
         
-        suggestions.truncate(5); // Limit to 5 suggestions
+        // Limit total suggestions to prevent UI slowdown
+        suggestions.truncate(5);
         suggestions
+    }
+    
+    /// Quick similarity check - much faster than full edit distance
+    fn is_similar_quick(&self, word1: &str, word2: &str) -> bool {
+        if word1 == word2 {
+            return false; // Don't suggest the same word
+        }
+        
+        // Quick checks first
+        if word1.len() == word2.len() {
+            // Same length - check if only 1-2 characters different
+            let mut diff_count = 0;
+            for (c1, c2) in word1.chars().zip(word2.chars()) {
+                if c1 != c2 {
+                    diff_count += 1;
+                    if diff_count > 2 {
+                        return false;
+                    }
+                }
+            }
+            return diff_count <= 2;
+        } else if (word1.len() as i32 - word2.len() as i32).abs() == 1 {
+            // Different by 1 character - check if it's an insertion/deletion
+            let (shorter, longer) = if word1.len() < word2.len() {
+                (word1, word2)
+            } else {
+                (word2, word1)
+            };
+            
+            // Simple check: see if shorter word is contained in longer word with 1 char difference
+            let mut i = 0;
+            let mut j = 0;
+            let mut diff_found = false;
+            
+            let shorter_chars: Vec<char> = shorter.chars().collect();
+            let longer_chars: Vec<char> = longer.chars().collect();
+            
+            while i < shorter_chars.len() && j < longer_chars.len() {
+                if shorter_chars[i] == longer_chars[j] {
+                    i += 1;
+                    j += 1;
+                } else if !diff_found {
+                    diff_found = true;
+                    j += 1; // Skip one character in longer word
+                } else {
+                    return false; // More than one difference
+                }
+            }
+            
+            return true;
+        }
+        
+        false
     }
 
     /// Apply common spelling correction patterns
@@ -295,16 +345,16 @@ impl SpellChecker {
             return 1.0;
         }
         
-        let len1 = word1.len();
-        let len2 = word2.len();
+        // Simple character-based similarity
+        let chars1: Vec<char> = word1.chars().collect();
+        let chars2: Vec<char> = word2.chars().collect();
+        
+        let len1 = chars1.len();
+        let len2 = chars2.len();
         
         if len1 == 0 || len2 == 0 {
             return 0.0;
         }
-
-        // Simple character-based similarity
-        let chars1: Vec<char> = word1.chars().collect();
-        let chars2: Vec<char> = word2.chars().collect();
         
         let mut matches = 0;
         let min_len = len1.min(len2);
@@ -316,7 +366,7 @@ impl SpellChecker {
         }
         
         // Bonus for same starting characters
-        let start_bonus = if chars1[0] == chars2[0] { 0.1 } else { 0.0 };
+        let start_bonus = if !chars1.is_empty() && !chars2.is_empty() && chars1[0] == chars2[0] { 0.1 } else { 0.0 };
         
         (matches as f64 / len1.max(len2) as f64) + start_bonus
     }
@@ -325,9 +375,8 @@ impl SpellChecker {
     pub fn check_text(&self, text: &str, config: &SpellCheckConfig) -> Vec<SpellError> {
         let mut errors = Vec::new();
         
-        log::debug!("Spell checking text: '{}'", text);
+        // Remove debug logging that might be slowing things down
         let words = Self::extract_words(text);
-        log::debug!("Extracted {} words: {:?}", words.len(), words.iter().map(|w| &w.word).collect::<Vec<_>>());
 
         for word_match in words {
             let word = word_match.word;
@@ -335,30 +384,21 @@ impl SpellChecker {
 
             // Skip words based on configuration
             if self.should_skip_word(&word, config) {
-                log::debug!("Skipping word: '{}'", word);
                 continue;
             }
 
             let is_correct = self.is_correct(&word);
-            log::debug!("Word '{}' is correct: {}", word, is_correct);
             
             if !is_correct {
-                let suggestions = self.suggest(&word);
-                let limited_suggestions = suggestions
-                    .into_iter()
-                    .take(config.max_suggestions)
-                    .collect();
-
-                log::debug!("Found spelling error: '{}' at position {}, suggestions: {:?}", word, word_pos, limited_suggestions);
+                // Don't compute suggestions during highlighting - only when requested
                 errors.push(SpellError {
                     word: word.to_string(),
                     position: word_pos,
-                    suggestions: limited_suggestions,
+                    suggestions: Vec::new(), // Empty suggestions - compute only when needed
                 });
             }
         }
 
-        log::debug!("Total spelling errors found: {}", errors.len());
         errors
     }
 

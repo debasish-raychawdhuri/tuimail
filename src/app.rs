@@ -411,9 +411,6 @@ impl App {
 
     /// Check if spell checking should run based on debounce timer
     pub fn update_spell_check(&mut self) {
-        // Disable spell checking completely to fix performance issues
-        return;
-        
         if self.spell_check_enabled && self.should_run_spell_check() {
             self.check_spelling();
         }
@@ -498,7 +495,7 @@ impl App {
             // Only run spell check if 500ms have passed since last keystroke
             last_time.elapsed() >= std::time::Duration::from_millis(500)
         } else {
-            true // Run spell check if no keystroke time recorded
+            false // Don't run spell check if no keystroke has been recorded
         }
     }
 
@@ -533,17 +530,9 @@ impl App {
             }
         };
 
-        // Check if we should skip spell checking for this text change
-        if self.can_do_incremental_check(&text) {
-            // Skip checking to avoid performance issues and moving highlights
-            // Just update the last checked text without running spell check
-            self.last_checked_text = text.to_string();
-            log::debug!("Skipping spell check for minor text change");
-        } else {
-            // Do full check only for significant changes
-            log::debug!("Performing full spell check for significant text change");
-            self.check_spelling_full(&text, &config);
-        }
+        // Always run spell check after debounce period
+        log::debug!("Performing spell check on text: '{}'", text);
+        self.check_spelling_full(&text, &config);
     }
 
     /// Calculate text similarity (simple ratio)
@@ -785,9 +774,17 @@ impl App {
         }
 
         // Find if cursor is on a misspelled word
-        for error in &self.spell_errors {
+        for error in &mut self.spell_errors {
             let word_end = error.position + error.word.len();
             if self.compose_cursor_pos >= error.position && self.compose_cursor_pos <= word_end {
+                // Compute suggestions on demand only when user requests them
+                if error.suggestions.is_empty() {
+                    if let Some(ref checker) = self.spell_checker {
+                        let config = crate::spellcheck::SpellCheckConfig::default();
+                        error.suggestions = checker.get_suggestions_for_word(&error.word, &config);
+                    }
+                }
+                
                 if !error.suggestions.is_empty() {
                     self.show_spell_suggestions = true;
                     self.selected_spell_suggestion = 0;
@@ -2343,8 +2340,8 @@ impl App {
                 self.compose_to_text = String::new();
                 self.compose_cc_text = String::new();
                 self.compose_bcc_text = String::new();
-                // Initialize spell checking for new compose
-                self.force_spell_check();
+                // Mark keystroke to trigger debounced spell check
+                self.mark_keystroke();
                 // Grammar check only runs manually (Alt+T)
                 Ok(())
             }
@@ -2581,8 +2578,8 @@ impl App {
                     ComposeField::Subject => self.compose_email.subject.len(), // End of Subject
                     ComposeField::Body => 0,                        // Beginning of Body for replies
                 };
-                // Trigger spell check when switching to a new field
-                self.force_spell_check();
+                // Mark keystroke to trigger debounced spell check when switching fields  
+                self.mark_keystroke();
                 Ok(())
             }
             KeyCode::BackTab => {
@@ -2602,8 +2599,8 @@ impl App {
                     ComposeField::Subject => self.compose_email.subject.len(), // End of Subject
                     ComposeField::Body => 0,                        // Beginning of Body for replies
                 };
-                // Trigger spell check when switching to a new field
-                self.force_spell_check();
+                // Mark keystroke to trigger debounced spell check when switching fields
+                self.mark_keystroke();
                 Ok(())
             }
             KeyCode::Up => {

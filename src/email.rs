@@ -18,6 +18,13 @@ use crate::config::{EmailAccount, ImapSecurity, SmtpSecurity};
 use crate::credentials::SecureCredentials;
 use crate::database::EmailDatabase;
 
+#[derive(Debug)]
+pub enum SyncStrategy {
+    InitialSync { days_back: i64 },
+    IncrementalSync { since_timestamp: i64 },
+    RecentSync { days_back: i64 },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FolderMetadata {
     pub last_uid: u32,
@@ -1431,14 +1438,282 @@ impl EmailClient {
         Ok(())
     }
     
+    /// Determine the appropriate sync strategy based on database state
+    pub fn determine_sync_strategy(&self, folder: &str) -> Result<SyncStrategy, EmailError> {
+        let account_email = &self.account.email;
+        
+        // Create database connection
+        let database = EmailDatabase::new(&self.db_path)
+            .map_err(|e| EmailError::ImapError(format!("Failed to open database: {}", e)))?;
+        
+        // Check if we have any emails in database for this folder
+        match database.get_email_count(account_email, folder) {
+            Ok(0) => {
+                // No emails in database - full initial sync
+                debug_log(&format!("No emails found for {}/{} - performing initial sync", account_email, folder));
+                Ok(SyncStrategy::InitialSync { days_back: 30 })
+            }
+            Ok(count) => {
+                // We have emails - find the most recent timestamp
+                match database.get_latest_email_timestamp(account_email, folder) {
+                    Ok(Some(latest_timestamp)) => {
+                        debug_log(&format!("Found {} emails, latest from timestamp {} - performing incremental sync", 
+                            count, latest_timestamp));
+                        Ok(SyncStrategy::IncrementalSync { since_timestamp: latest_timestamp })
+                    }
+                    Ok(None) => {
+                        // Emails exist but no valid timestamp - fallback to recent sync
+                        debug_log("Emails exist but no valid timestamp - syncing last 7 days");
+                        Ok(SyncStrategy::RecentSync { days_back: 7 })
+                    }
+                    Err(e) => {
+                        debug_log(&format!("Error getting latest timestamp: {} - fallback to recent sync", e));
+                        Ok(SyncStrategy::RecentSync { days_back: 7 })
+                    }
+                }
+            }
+            Err(e) => {
+                debug_log(&format!("Error checking email count: {} - performing initial sync", e));
+                Ok(SyncStrategy::InitialSync { days_back: 30 })
+            }
+        }
+    }
+
+    /// Smart sync that chooses strategy based on database state
+    pub fn smart_sync(&self, folder: &str) -> Result<Vec<Email>, EmailError> {
+        let strategy = self.determine_sync_strategy(folder)?;
+        
+        match strategy {
+            SyncStrategy::InitialSync { days_back } => {
+                debug_log(&format!("Performing initial sync - last {} days", days_back));
+                self.sync_recent_emails(folder, days_back)
+            }
+            
+            SyncStrategy::IncrementalSync { since_timestamp } => {
+                debug_log(&format!("Performing incremental sync since timestamp {}", since_timestamp));
+                
+                // Convert timestamp to date for IMAP search
+                let since_date = DateTime::<Utc>::from_timestamp(since_timestamp, 0)
+                    .unwrap_or_else(|| Utc::now() - chrono::Duration::days(1));
+                
+                self.sync_emails_since_date(folder, since_date)
+            }
+            
+            SyncStrategy::RecentSync { days_back } => {
+                debug_log(&format!("Performing recent sync - last {} days", days_back));
+                self.sync_recent_emails(folder, days_back)
+            }
+        }
+    }
+
+    fn sync_recent_emails(&self, folder: &str, days_back: i64) -> Result<Vec<Email>, EmailError> {
+        let since_date = Utc::now() - chrono::Duration::days(days_back);
+        self.sync_emails_since_date(folder, since_date)
+    }
+
+    fn sync_emails_since_date(&self, folder: &str, since_date: DateTime<Utc>) -> Result<Vec<Email>, EmailError> {
+        // Create database connection
+        let database = EmailDatabase::new(&self.db_path)
+            .map_err(|e| EmailError::ImapError(format!("Failed to open database: {}", e)))?;
+        
+        // Format date for IMAP SEARCH (DD-MMM-YYYY format)
+        let search_date = since_date.format("%d-%b-%Y").to_string();
+        debug_log(&format!("Searching for emails since: {}", search_date));
+        
+        // Try smart sync first, fallback to traditional method if it fails
+        match self.try_smart_sync_search(folder, &search_date, &database) {
+            Ok(emails) => {
+                debug_log(&format!("Smart sync succeeded: {} emails", emails.len()));
+                Ok(emails)
+            }
+            Err(e) => {
+                debug_log(&format!("Smart sync failed: {}, falling back to traditional fetch", e));
+                // Fallback to traditional fetch with a reasonable limit
+                self.fetch_emails(folder, 100)
+            }
+        }
+    }
+
+    fn try_smart_sync_search(&self, folder: &str, search_date: &str, database: &EmailDatabase) -> Result<Vec<Email>, EmailError> {
+        match self.account.imap_security {
+            ImapSecurity::SSL | ImapSecurity::StartTLS => {
+                self.sync_emails_since_date_secure(folder, search_date, database)
+            }
+            ImapSecurity::None => {
+                self.sync_emails_since_date_plain(folder, search_date, database)
+            }
+        }
+    }
+
+    fn sync_emails_since_date_secure(&self, folder: &str, search_date: &str, database: &EmailDatabase) -> Result<Vec<Email>, EmailError> {
+        let mut session = self.connect_imap_secure()?;
+        session.select(folder)
+            .map_err(|e| EmailError::ImapError(e.to_string()))?;
+        
+        self.perform_sync_search(&mut session, folder, search_date, database)
+    }
+
+    fn sync_emails_since_date_plain(&self, folder: &str, search_date: &str, database: &EmailDatabase) -> Result<Vec<Email>, EmailError> {
+        let mut session = self.connect_imap_plain()?;
+        session.select(folder)
+            .map_err(|e| EmailError::ImapError(e.to_string()))?;
+        
+        self.perform_sync_search(&mut session, folder, search_date, database)
+    }
+
+    fn perform_sync_search<T: std::io::Read + std::io::Write>(&self, session: &mut imap::Session<T>, folder: &str, search_date: &str, database: &EmailDatabase) -> Result<Vec<Email>, EmailError> {
+        // Try the UID SEARCH command with error handling
+        let search_result = match session.uid_search(&format!("SINCE {}", search_date)) {
+            Ok(result) => {
+                debug_log(&format!("UID SEARCH SINCE succeeded: {} results", result.len()));
+                result
+            }
+            Err(e) => {
+                debug_log(&format!("UID SEARCH SINCE failed: {}, trying alternative approaches", e));
+                
+                // Try without SINCE - just get recent emails by UID
+                match self.get_recent_uids_fallback(session, database, folder) {
+                    Ok(uids) => {
+                        debug_log(&format!("Fallback UID approach succeeded: {} UIDs", uids.len()));
+                        uids
+                    }
+                    Err(fallback_err) => {
+                        debug_log(&format!("Fallback UID approach also failed: {}", fallback_err));
+                        return Err(EmailError::ImapError(format!("Both SEARCH and fallback failed: {} / {}", e, fallback_err)));
+                    }
+                }
+            }
+        };
+        
+        if search_result.is_empty() {
+            debug_log("No new emails found");
+            return Ok(Vec::new());
+        }
+        
+        debug_log(&format!("Found {} emails to sync", search_result.len()));
+        
+        let mut new_emails = Vec::new();
+        let mut updated_flags = 0;
+        
+        // Process in batches to avoid server limits
+        let search_vec: Vec<u32> = search_result.into_iter().collect();
+        for batch in search_vec.chunks(50) {
+            let sequence_set = batch.iter().map(|uid| uid.to_string()).collect::<Vec<_>>().join(",");
+            
+            let messages = match session.uid_fetch(&sequence_set, "RFC822 FLAGS UID") {
+                Ok(msgs) => msgs,
+                Err(e) => {
+                    debug_log(&format!("Failed to fetch batch {}: {}", sequence_set, e));
+                    continue; // Skip this batch and continue with others
+                }
+            };
+            
+            for message in messages.iter() {
+                if let Some(uid) = message.uid {
+                    let uid_str = uid.to_string();
+                    
+                    // Check if email already exists in database
+                    match database.email_exists(&self.account.email, folder, &uid_str) {
+                        Ok(true) => {
+                            // Email exists - check for flag changes
+                            let server_flags: Vec<String> = message.flags().iter().map(|f| f.to_string()).collect();
+                            let server_seen = server_flags.iter().any(|f| f == "\\Seen");
+                            
+                            // Update flag if different
+                            if let Err(e) = database.update_email_seen_status(&self.account.email, folder, uid, server_seen) {
+                                debug_log(&format!("Failed to update flag for UID {}: {}", uid_str, e));
+                            } else {
+                                updated_flags += 1;
+                            }
+                        }
+                        Ok(false) => {
+                            // New email - parse and save
+                            if let Some(body) = message.body() {
+                                if let Some(parsed) = mail_parser::Message::parse(body) {
+                                    let flags: Vec<String> = message.flags().iter().map(|f| f.to_string()).collect();
+                                    match Email::from_parsed_email(&parsed, &uid_str, folder, flags) {
+                                        Ok(email) => {
+                                            // Save to database
+                                            if let Err(e) = database.save_email(&email) {
+                                                debug_log(&format!("Failed to save email {}: {}", uid_str, e));
+                                            } else {
+                                                new_emails.push(email);
+                                            }
+                                        }
+                                        Err(e) => {
+                                            debug_log(&format!("Failed to parse email {}: {}", uid_str, e));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            debug_log(&format!("Error checking if email exists {}: {}", uid_str, e));
+                        }
+                    }
+                }
+            }
+            
+            // Small delay between batches
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        
+        debug_log(&format!("Sync completed: {} new emails, {} flag updates", new_emails.len(), updated_flags));
+        Ok(new_emails)
+    }
+
+    fn get_recent_uids_fallback<T: std::io::Read + std::io::Write>(&self, session: &mut imap::Session<T>, database: &EmailDatabase, folder: &str) -> Result<HashSet<u32>, EmailError> {
+        // Get the highest UID we have in database
+        let _last_known_uid = match database.get_latest_email_timestamp(&self.account.email, folder) {
+            Ok(Some(_)) => {
+                // We have emails, try to get recent ones by UID range
+                match session.search("ALL") {
+                    Ok(all_uids) => {
+                        // Convert to Vec, sort, and get the last 100 UIDs as a fallback
+                        let mut uid_vec: Vec<u32> = all_uids.into_iter().collect();
+                        uid_vec.sort();
+                        let recent_uids: HashSet<u32> = uid_vec.into_iter().rev().take(100).collect();
+                        debug_log(&format!("Fallback: using last 100 UIDs from ALL search"));
+                        recent_uids
+                    }
+                    Err(e) => {
+                        return Err(EmailError::ImapError(format!("ALL search failed: {}", e)));
+                    }
+                }
+            }
+            Ok(None) => {
+                // No emails in database, get recent ones
+                match session.search("ALL") {
+                    Ok(all_uids) => {
+                        let mut uid_vec: Vec<u32> = all_uids.into_iter().collect();
+                        uid_vec.sort();
+                        let recent_uids: HashSet<u32> = uid_vec.into_iter().rev().take(100).collect();
+                        debug_log(&format!("Fallback: no database emails, using last 100 UIDs"));
+                        recent_uids
+                    }
+                    Err(e) => {
+                        return Err(EmailError::ImapError(format!("ALL search failed: {}", e)));
+                    }
+                }
+            }
+            Err(e) => {
+                return Err(EmailError::ImapError(format!("Database error: {}", e)));
+            }
+        };
+        
+        Ok(_last_known_uid)
+    }
+
     pub fn mark_as_read(&self, email: &Email) -> Result<(), EmailError> {
-        debug_log(&format!("Marking email as read: {} in folder {}", email.id, email.folder));
+        debug_log(&format!("🔄 Marking email as read: {} in folder {}", email.id, email.folder));
         
         // Validate email ID before attempting STORE operation
         if email.id.is_empty() || email.id == "0" {
-            debug_log(&format!("Invalid email ID '{}', skipping mark as read", email.id));
+            debug_log(&format!("❌ Invalid email ID '{}', skipping mark as read", email.id));
             return Err(EmailError::ImapError("Invalid email ID for STORE operation".to_string()));
         }
+        
+        debug_log(&format!("📧 Email details: ID={}, Folder={}", email.id, email.folder));
         
         // Add retry logic for IMAP connection issues
         let mut attempts = 0;
@@ -1446,51 +1721,112 @@ impl EmailClient {
         
         while attempts < max_attempts {
             attempts += 1;
+            debug_log(&format!("🔄 Attempt {} of {} to mark email {} as read", attempts, max_attempts, email.id));
             
             let result = match self.account.imap_security {
                 ImapSecurity::SSL | ImapSecurity::StartTLS => {
+                    debug_log(&format!("🔐 Using secure IMAP connection for {}", self.account.email));
                     match self.connect_imap_secure() {
                         Ok(mut session) => {
+                            debug_log(&format!("✅ IMAP connection established for {}", self.account.email));
                             match session.select(&email.folder) {
-                                Ok(_) => {
-                                    debug_log(&format!("Attempting STORE command with UID: {}", email.id));
-                                    session.uid_store(&email.id, "+FLAGS (\\Seen)")
-                                        .map_err(|e| EmailError::ImapError(e.to_string()))
+                                Ok(select_result) => {
+                                    debug_log(&format!("✅ Folder '{}' selected. Mailbox info: exists={}, recent={}", 
+                                        email.folder, select_result.exists, select_result.recent));
+                                    debug_log(&format!("🔄 Attempting STORE command: UID {} +FLAGS (\\Seen)", email.id));
+                                    
+                                    match session.uid_store(&email.id, "+FLAGS (\\Seen)") {
+                                        Ok(store_result) => {
+                                            debug_log(&format!("✅ STORE command successful for UID {}", email.id));
+                                            debug_log(&format!("📊 STORE result: {:?}", store_result));
+                                            
+                                            // Properly close the session to ensure changes persist
+                                            debug_log("🔄 Closing IMAP session to ensure changes persist...");
+                                            if let Err(e) = session.close() {
+                                                debug_log(&format!("⚠️ Warning: Failed to close session cleanly: {}", e));
+                                            } else {
+                                                debug_log("✅ IMAP session closed successfully");
+                                            }
+                                            
+                                            Ok(())
+                                        }
+                                        Err(e) => {
+                                            debug_log(&format!("❌ STORE command failed for UID {}: {}", email.id, e));
+                                            Err(EmailError::ImapError(e.to_string()))
+                                        }
+                                    }
                                 }
-                                Err(e) => Err(EmailError::ImapError(e.to_string()))
+                                Err(e) => {
+                                    debug_log(&format!("❌ Failed to select folder '{}': {}", email.folder, e));
+                                    Err(EmailError::ImapError(e.to_string()))
+                                }
                             }
                         }
-                        Err(e) => Err(e)
+                        Err(e) => {
+                            debug_log(&format!("❌ Failed to establish IMAP connection: {}", e));
+                            Err(e)
+                        }
                     }
                 }
                 ImapSecurity::None => {
+                    debug_log(&format!("🔓 Using plain IMAP connection for {}", self.account.email));
                     match self.connect_imap_plain() {
                         Ok(mut session) => {
+                            debug_log(&format!("✅ Plain IMAP connection established for {}", self.account.email));
                             match session.select(&email.folder) {
-                                Ok(_) => {
-                                    debug_log(&format!("Attempting STORE command with UID: {}", email.id));
-                                    session.uid_store(&email.id, "+FLAGS (\\Seen)")
-                                        .map_err(|e| EmailError::ImapError(e.to_string()))
+                                Ok(select_result) => {
+                                    debug_log(&format!("✅ Folder '{}' selected. Mailbox info: exists={}, recent={}", 
+                                        email.folder, select_result.exists, select_result.recent));
+                                    debug_log(&format!("🔄 Attempting STORE command: UID {} +FLAGS (\\Seen)", email.id));
+                                    
+                                    match session.uid_store(&email.id, "+FLAGS (\\Seen)") {
+                                        Ok(store_result) => {
+                                            debug_log(&format!("✅ STORE command successful for UID {}", email.id));
+                                            debug_log(&format!("📊 STORE result: {:?}", store_result));
+                                            
+                                            // Properly close the session to ensure changes persist
+                                            debug_log("🔄 Closing IMAP session to ensure changes persist...");
+                                            if let Err(e) = session.close() {
+                                                debug_log(&format!("⚠️ Warning: Failed to close session cleanly: {}", e));
+                                            } else {
+                                                debug_log("✅ IMAP session closed successfully");
+                                            }
+                                            
+                                            Ok(())
+                                        }
+                                        Err(e) => {
+                                            debug_log(&format!("❌ STORE command failed for UID {}: {}", email.id, e));
+                                            Err(EmailError::ImapError(e.to_string()))
+                                        }
+                                    }
                                 }
-                                Err(e) => Err(EmailError::ImapError(e.to_string()))
+                                Err(e) => {
+                                    debug_log(&format!("❌ Failed to select folder '{}': {}", email.folder, e));
+                                    Err(EmailError::ImapError(e.to_string()))
+                                }
                             }
                         }
-                        Err(e) => Err(e)
+                        Err(e) => {
+                            debug_log(&format!("❌ Failed to establish plain IMAP connection: {}", e));
+                            Err(e)
+                        }
                     }
                 }
             };
             
             match result {
                 Ok(_) => {
-                    debug_log(&format!("Successfully marked email {} as read", email.id));
+                    debug_log(&format!("✅ Successfully marked email {} as read on attempt {}", email.id, attempts));
                     return Ok(());
                 }
                 Err(e) => {
-                    debug_log(&format!("Attempt {} failed to mark email as read: {}", attempts, e));
+                    debug_log(&format!("❌ Attempt {} failed to mark email as read: {}", attempts, e));
                     if attempts >= max_attempts {
+                        debug_log(&format!("❌ All {} attempts failed for email {}", max_attempts, email.id));
                         return Err(e);
                     }
                     // Wait a bit before retrying
+                    debug_log(&format!("⏳ Waiting 500ms before retry attempt {}", attempts + 1));
                     std::thread::sleep(std::time::Duration::from_millis(500));
                 }
             }
@@ -1783,13 +2119,7 @@ impl EmailClient {
                 Ok(missed_emails) => {
                     if !missed_emails.is_empty() {
                         debug_log(&format!("Found {} missed emails", missed_emails.len()));
-                        // TODO: In new architecture, this would be handled by sync daemon
-                        // if let Err(e) = database.save_emails(&self.account.email, folder, &missed_emails) {
-                        //     debug_log(&format!("Failed to save missed emails to database: {}", e));
-                        // } else {
-                        //     debug_log("Successfully saved missed emails to database");
-                        // }
-                    }
+                                            }
                 }
                 Err(e) => {
                     debug_log(&format!("Failed to fetch missed emails: {}", e));
@@ -2293,7 +2623,7 @@ impl EmailClient {
 
                 // Fetch the new emails
                 let sequence_set = search_result.iter().map(|uid| uid.to_string()).collect::<Vec<_>>().join(",");
-                let messages = session.fetch(&sequence_set, "RFC822 FLAGS")
+                let messages = session.uid_fetch(&sequence_set, "RFC822 FLAGS UID")
                     .map_err(|e| EmailError::ImapError(format!("Failed to fetch new emails: {}", e)))?;
 
                 let mut emails = Vec::new();
@@ -2343,7 +2673,7 @@ impl EmailClient {
 
                 // Fetch the new emails
                 let sequence_set = search_result.iter().map(|uid| uid.to_string()).collect::<Vec<_>>().join(",");
-                let messages = session.fetch(&sequence_set, "RFC822 FLAGS")
+                let messages = session.uid_fetch(&sequence_set, "RFC822 FLAGS UID")
                     .map_err(|e| EmailError::ImapError(format!("Failed to fetch new emails: {}", e)))?;
 
                 let mut emails = Vec::new();

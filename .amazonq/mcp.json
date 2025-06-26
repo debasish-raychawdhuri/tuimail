@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "terminal": {
+      "command": "/home/debasish/work/talentica/terminal-mcp-server/start_mcp_server.sh",
+      "args": [],
+      "env": {},
+      "timeout": 120000
+    }
+  }
+}

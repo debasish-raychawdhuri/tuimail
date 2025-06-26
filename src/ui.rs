@@ -1177,11 +1177,8 @@ fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
     let mut text = String::new();
     
     // Show current account and folder
-    if let Some(account_data) = app.accounts.get(&app.current_account_idx) {
-        if !account_data.folders.is_empty() {
-            text.push_str(&format!("Folder: {} | ", account_data.folders[account_data.selected_folder_idx]));
-        }
-    }
+    // Show current folder
+    text.push_str(&format!("Folder: {} | ", app.selected_folder));
     
     // Show email count
     text.push_str(&format!("Emails: {} | ", app.emails.len()));
