@@ -503,6 +503,9 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> AppRe
     let mut last_db_poll = std::time::Instant::now();
     const DB_POLL_INTERVAL: Duration = Duration::from_secs(5); // Poll database every 5 seconds (reduced from 2)
     
+    // Initial UI draw on startup
+    terminal.draw(|frame| ui(frame, app))?;
+    
     loop {
         // Poll database for changes periodically
         if last_db_poll.elapsed() >= DB_POLL_INTERVAL {

@@ -255,17 +255,15 @@ impl App {
                 name: account.name.clone(),
                 email: account.email.clone(),
                 index,
-                expanded: index == config.default_account, // Expand default account
+                expanded: true, // Expand all accounts
             });
 
-            // Add default folders for expanded accounts
-            if index == config.default_account {
-                folder_items.push(FolderItem::Folder {
-                    name: "INBOX".to_string(),
-                    account_index: index,
-                    full_path: "INBOX".to_string(),
-                });
-            }
+            // Add default folders for all expanded accounts (but don't load emails yet)
+            folder_items.push(FolderItem::Folder {
+                name: "INBOX".to_string(),
+                account_index: index,
+                full_path: "INBOX".to_string(),
+            });
         }
 
         let current_account_idx = config.default_account;
@@ -2269,20 +2267,13 @@ impl App {
             }
         }
 
-        // Load emails for the first folder of the current account
+        // Set the selected folder but don't load emails synchronously during init
         if let Some(account_data) = self.accounts.get(&self.current_account_idx) {
             if !account_data.folders.is_empty() {
                 let folder = account_data.folders[0].clone();
                 debug_log(&format!("Setting selected_folder from '{}' to '{}'", self.selected_folder, folder));
                 self.selected_folder = folder.clone(); // Update selected folder
-                debug_log(&format!("Loading initial emails for folder: {}", folder));
-                if let Err(e) =
-                    self.load_emails_for_account_folder(self.current_account_idx, &folder)
-                {
-                    self.show_error(&format!("Failed to load emails: {}", e));
-                } else {
-                    debug_log(&format!("Successfully loaded initial emails for folder: {}", folder));
-                }
+                debug_log(&format!("Selected initial folder: {} (emails will load asynchronously)", folder));
             }
         }
 
