@@ -171,3 +171,120 @@ impl Config {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_default_config() {
+        let config = Config::default();
+        assert!(config.accounts.is_empty());
+        assert_eq!(config.default_account, 0);
+    }
+
+    #[test]
+    fn test_default_email_account() {
+        let account = EmailAccount::default();
+        assert_eq!(account.name, "Default Account");
+        assert_eq!(account.imap_port, 993);
+        assert_eq!(account.smtp_port, 587);
+        assert!(account.signature.is_some());
+    }
+
+    #[test]
+    fn test_default_ui_config() {
+        let ui = UIConfig::default();
+        assert_eq!(ui.theme, "default");
+        assert!(!ui.show_headers);
+        assert_eq!(ui.refresh_interval, 300);
+        assert!(ui.preview_pane);
+    }
+
+    #[test]
+    fn test_config_save_and_load_roundtrip() {
+        let mut config = Config::default();
+        config.accounts.push(EmailAccount::default());
+        config.default_account = 0;
+        config.ui.theme = "dark".to_string();
+
+        let tmp = std::env::temp_dir().join("tuimail_test_config.json");
+        let path_str = tmp.to_string_lossy().to_string();
+
+        config.save(&path_str).unwrap();
+        let loaded = Config::load(&path_str).unwrap();
+
+        assert_eq!(loaded.accounts.len(), 1);
+        assert_eq!(loaded.accounts[0].name, "Default Account");
+        assert_eq!(loaded.ui.theme, "dark");
+
+        std::fs::remove_file(&tmp).ok();
+    }
+
+    #[test]
+    fn test_config_load_nonexistent_returns_default() {
+        let config = Config::load("/tmp/tuimail_nonexistent_config_12345.json").unwrap();
+        assert!(config.accounts.is_empty());
+    }
+
+    #[test]
+    fn test_config_load_invalid_json() {
+        let tmp = std::env::temp_dir().join("tuimail_test_bad_config.json");
+        std::fs::write(&tmp, "not valid json{{{").unwrap();
+        let result = Config::load(&tmp.to_string_lossy());
+        assert!(result.is_err());
+        std::fs::remove_file(&tmp).ok();
+    }
+
+    #[test]
+    fn test_get_current_account_safe_empty() {
+        let config = Config::default();
+        let account = config.get_current_account_safe();
+        assert_eq!(account.email, "user@example.com"); // returns default
+    }
+
+    #[test]
+    fn test_get_current_account_safe_out_of_bounds() {
+        let mut config = Config::default();
+        config.accounts.push(EmailAccount {
+            name: "First".to_string(),
+            ..EmailAccount::default()
+        });
+        config.default_account = 99; // way out of bounds
+        let account = config.get_current_account_safe();
+        assert_eq!(account.name, "First"); // returns first
+    }
+
+    #[test]
+    fn test_get_current_account_safe_valid_index() {
+        let mut config = Config::default();
+        config.accounts.push(EmailAccount {
+            name: "Zero".to_string(),
+            ..EmailAccount::default()
+        });
+        config.accounts.push(EmailAccount {
+            name: "One".to_string(),
+            ..EmailAccount::default()
+        });
+        config.default_account = 1;
+        let account = config.get_current_account_safe();
+        assert_eq!(account.name, "One");
+    }
+
+    #[test]
+    fn test_config_serialization_imap_security() {
+        let account = EmailAccount::default();
+        let json = serde_json::to_string(&account).unwrap();
+        assert!(json.contains("SSL"));
+        let deser: EmailAccount = serde_json::from_str(&json).unwrap();
+        assert!(matches!(deser.imap_security, ImapSecurity::SSL));
+    }
+
+    #[test]
+    fn test_config_serialization_smtp_security() {
+        let account = EmailAccount::default();
+        let json = serde_json::to_string(&account).unwrap();
+        let deser: EmailAccount = serde_json::from_str(&json).unwrap();
+        assert!(matches!(deser.smtp_security, SmtpSecurity::StartTLS));
+    }
+}

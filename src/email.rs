@@ -391,7 +391,9 @@ impl Email {
                         debug_log(&format!("Found From header: '{}'", value_str));
                         let addresses = parse_email_addresses(&value_str);
                         debug_log(&format!("Parsed {} addresses from From header", addresses.len()));
-                        email.from.extend(addresses);
+                        if email.from.is_empty() {
+                            email.from.extend(addresses);
+                        }
                     }
                     "to" => {
                         let addresses = parse_email_addresses(&value_str);
@@ -924,10 +926,17 @@ impl EmailClient {
         Ok(session)
     }
     
+    fn connect_imap_with_security(&self) -> Result<Session<TlsStream<std::net::TcpStream>>, EmailError> {
+        if matches!(self.account.imap_security, ImapSecurity::StartTLS) {
+            debug_log("Warning: StartTLS requested but imap crate does not support STARTTLS upgrade. Using implicit TLS instead. Consider switching to SSL on port 993.");
+        }
+        self.connect_imap_secure()
+    }
+
     pub fn list_folders(&self) -> Result<Vec<String>, EmailError> {
         match self.account.imap_security {
             ImapSecurity::SSL | ImapSecurity::StartTLS => {
-                let mut session = self.connect_imap_secure()?;
+                let mut session = self.connect_imap_with_security()?;
                 let folders = session
                     .list(None, Some("*"))
                     .map_err(|e| EmailError::ImapError(e.to_string()))?;
@@ -1546,7 +1555,7 @@ impl EmailClient {
     }
 
     fn sync_emails_since_date_secure(&self, folder: &str, search_date: &str, database: &EmailDatabase) -> Result<Vec<Email>, EmailError> {
-        let mut session = self.connect_imap_secure()?;
+        let mut session = self.connect_imap_with_security()?;
         session.select(folder)
             .map_err(|e| EmailError::ImapError(e.to_string()))?;
         
@@ -1634,7 +1643,7 @@ impl EmailClient {
                                     match Email::from_parsed_email(&parsed, &uid_str, folder, flags) {
                                         Ok(email) => {
                                             // Save to database
-                                            if let Err(e) = database.save_email(&email) {
+                                            if let Err(e) = database.save_email(&email, &self.account.email) {
                                                 debug_log(&format!("Failed to save email {}: {}", uid_str, e));
                                             } else {
                                                 new_emails.push(email);
@@ -1667,7 +1676,7 @@ impl EmailClient {
         let _last_known_uid = match database.get_latest_email_timestamp(&self.account.email, folder) {
             Ok(Some(_)) => {
                 // We have emails, try to get recent ones by UID range
-                match session.search("ALL") {
+                match session.uid_search("ALL") {
                     Ok(all_uids) => {
                         // Convert to Vec, sort, and get the last 100 UIDs as a fallback
                         let mut uid_vec: Vec<u32> = all_uids.into_iter().collect();
@@ -1683,7 +1692,7 @@ impl EmailClient {
             }
             Ok(None) => {
                 // No emails in database, get recent ones
-                match session.search("ALL") {
+                match session.uid_search("ALL") {
                     Ok(all_uids) => {
                         let mut uid_vec: Vec<u32> = all_uids.into_iter().collect();
                         uid_vec.sort();
@@ -1726,7 +1735,7 @@ impl EmailClient {
             let result = match self.account.imap_security {
                 ImapSecurity::SSL | ImapSecurity::StartTLS => {
                     debug_log(&format!("🔐 Using secure IMAP connection for {}", self.account.email));
-                    match self.connect_imap_secure() {
+                    match self.connect_imap_with_security() {
                         Ok(mut session) => {
                             debug_log(&format!("✅ IMAP connection established for {}", self.account.email));
                             match session.select(&email.folder) {
@@ -1845,7 +1854,7 @@ impl EmailClient {
         
         match self.account.imap_security {
             ImapSecurity::SSL | ImapSecurity::StartTLS => {
-                let mut session = self.connect_imap_secure()?;
+                let mut session = self.connect_imap_with_security()?;
                 session
                     .select(&email.folder)
                     .map_err(|e| EmailError::ImapError(e.to_string()))?;
@@ -1880,7 +1889,7 @@ impl EmailClient {
         
         match self.account.imap_security {
             ImapSecurity::SSL | ImapSecurity::StartTLS => {
-                let mut session = self.connect_imap_secure()?;
+                let mut session = self.connect_imap_with_security()?;
                 session
                     .select(&email.folder)
                     .map_err(|e| EmailError::ImapError(e.to_string()))?;
@@ -1929,7 +1938,7 @@ impl EmailClient {
     }
     
     fn fetch_new_emails_since_count_secure(&self, folder: &str, last_count: usize) -> Result<Vec<Email>, EmailError> {
-        let mut session = self.connect_imap_secure()?;
+        let mut session = self.connect_imap_with_security()?;
         session.select(folder)
             .map_err(|e| EmailError::ImapError(e.to_string()))?;
         
@@ -2091,7 +2100,7 @@ impl EmailClient {
         // Get current email count
         let current_count = match self.account.imap_security {
             ImapSecurity::SSL | ImapSecurity::StartTLS => {
-                let mut session = self.connect_imap_secure()?;
+                let mut session = self.connect_imap_with_security()?;
                 session.select(folder)
                     .map_err(|e| EmailError::ImapError(e.to_string()))?;
                 session.search("ALL")
@@ -2138,7 +2147,7 @@ impl EmailClient {
         // Try to connect and check capabilities
         match self.account.imap_security {
             ImapSecurity::SSL | ImapSecurity::StartTLS => {
-                if let Ok(mut session) = self.connect_imap_secure() {
+                if let Ok(mut session) = self.connect_imap_with_security() {
                     session.capabilities().map(|caps| caps.has_str("IDLE")).unwrap_or(false)
                 } else {
                     false
@@ -2224,7 +2233,7 @@ impl EmailClient {
         running: &Arc<Mutex<bool>>,
         last_known_count: &mut usize,
     ) -> Result<(), EmailError> {
-        let mut session = self.connect_imap_secure()?;
+        let mut session = self.connect_imap_with_security()?;
         session.select(folder)
             .map_err(|e| EmailError::ImapError(e.to_string()))?;
         
@@ -2514,7 +2523,7 @@ impl EmailClient {
     pub fn move_email(&self, email: &Email, target_folder: &str) -> Result<(), EmailError> {
         match self.account.imap_security {
             ImapSecurity::SSL | ImapSecurity::StartTLS => {
-                let mut session = self.connect_imap_secure()?;
+                let mut session = self.connect_imap_with_security()?;
                 session
                     .select(&email.folder)
                     .map_err(|e| EmailError::ImapError(e.to_string()))?;
@@ -2546,7 +2555,7 @@ impl EmailClient {
         
         match self.account.imap_security {
             ImapSecurity::SSL | ImapSecurity::StartTLS => {
-                let mut session = self.connect_imap_secure()?;
+                let mut session = self.connect_imap_with_security()?;
 
                 // Select folder
                 session.select(folder)
@@ -2602,7 +2611,7 @@ impl EmailClient {
         
         match self.account.imap_security {
             ImapSecurity::SSL | ImapSecurity::StartTLS => {
-                let mut session = self.connect_imap_secure()?;
+                let mut session = self.connect_imap_with_security()?;
 
                 // Select folder
                 session.select(folder)
@@ -2810,5 +2819,240 @@ impl EmailFetcher {
 impl Drop for EmailFetcher {
     fn drop(&mut self) {
         self.stop();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- parse_email_addresses tests ---
+
+    #[test]
+    fn test_parse_name_and_angle_bracket() {
+        let addrs = parse_email_addresses("John Doe <john@example.com>");
+        assert_eq!(addrs.len(), 1);
+        assert_eq!(addrs[0].name.as_deref(), Some("John Doe"));
+        assert_eq!(addrs[0].address, "john@example.com");
+    }
+
+    #[test]
+    fn test_parse_quoted_name() {
+        let addrs = parse_email_addresses("\"Jane Doe\" <jane@example.com>");
+        assert_eq!(addrs.len(), 1);
+        assert_eq!(addrs[0].name.as_deref(), Some("Jane Doe"));
+        assert_eq!(addrs[0].address, "jane@example.com");
+    }
+
+    #[test]
+    fn test_parse_bare_angle_brackets() {
+        let addrs = parse_email_addresses("<noreply@example.com>");
+        assert_eq!(addrs.len(), 1);
+        assert_eq!(addrs[0].name, None);
+        assert_eq!(addrs[0].address, "noreply@example.com");
+    }
+
+    #[test]
+    fn test_parse_plain_address() {
+        let addrs = parse_email_addresses("user@domain.org");
+        assert_eq!(addrs.len(), 1);
+        assert_eq!(addrs[0].name, None);
+        assert_eq!(addrs[0].address, "user@domain.org");
+    }
+
+    #[test]
+    fn test_parse_multiple_addresses() {
+        let addrs = parse_email_addresses("Alice <alice@a.com>, Bob <bob@b.com>, charlie@c.com");
+        assert_eq!(addrs.len(), 3);
+        assert_eq!(addrs[0].address, "alice@a.com");
+        assert_eq!(addrs[1].address, "bob@b.com");
+        assert_eq!(addrs[2].address, "charlie@c.com");
+    }
+
+    #[test]
+    fn test_parse_empty_string() {
+        let addrs = parse_email_addresses("");
+        assert_eq!(addrs.len(), 0);
+    }
+
+    #[test]
+    fn test_parse_garbage_no_at() {
+        let addrs = parse_email_addresses("not-an-email");
+        assert_eq!(addrs.len(), 0);
+    }
+
+    #[test]
+    fn test_parse_trailing_comma() {
+        let addrs = parse_email_addresses("user@example.com, ");
+        assert_eq!(addrs.len(), 1);
+    }
+
+    // --- Email struct tests ---
+
+    #[test]
+    fn test_email_new_defaults() {
+        let email = Email::new();
+        assert_eq!(email.subject, "");
+        assert!(email.from.is_empty());
+        assert!(email.to.is_empty());
+        assert_eq!(email.folder, "INBOX");
+        assert!(!email.seen);
+        assert!(email.body_text.is_none());
+        assert!(email.attachments.is_empty());
+    }
+
+    #[test]
+    fn test_email_reply_to_with_header() {
+        let mut email = Email::new();
+        email.headers.insert("Reply-To".to_string(), "reply@example.com".to_string());
+        let reply_to = email.reply_to();
+        assert_eq!(reply_to.len(), 1);
+        assert_eq!(reply_to[0].address, "reply@example.com");
+    }
+
+    #[test]
+    fn test_email_reply_to_without_header() {
+        let email = Email::new();
+        assert!(email.reply_to().is_empty());
+    }
+
+    #[test]
+    fn test_email_message_id() {
+        let mut email = Email::new();
+        assert_eq!(email.message_id(), "");
+        email.headers.insert("Message-ID".to_string(), "<abc@example.com>".to_string());
+        assert_eq!(email.message_id(), "<abc@example.com>");
+    }
+
+    #[test]
+    fn test_email_references() {
+        let mut email = Email::new();
+        assert!(email.references().is_empty());
+        email.headers.insert("References".to_string(), "<a@x.com> <b@x.com>".to_string());
+        let refs = email.references();
+        assert_eq!(refs.len(), 2);
+        assert_eq!(refs[0], "<a@x.com>");
+        assert_eq!(refs[1], "<b@x.com>");
+    }
+
+    #[test]
+    fn test_email_set_in_reply_to() {
+        let mut email = Email::new();
+        email.set_in_reply_to("<msg123@example.com>".to_string());
+        assert_eq!(email.headers.get("In-Reply-To").unwrap(), "<msg123@example.com>");
+    }
+
+    #[test]
+    fn test_email_set_references() {
+        let mut email = Email::new();
+        email.set_references(vec!["<a@x.com>".to_string(), "<b@x.com>".to_string()]);
+        assert_eq!(email.headers.get("References").unwrap(), "<a@x.com> <b@x.com>");
+    }
+
+    #[test]
+    fn test_email_set_references_empty() {
+        let mut email = Email::new();
+        email.set_references(vec![]);
+        assert!(email.headers.get("References").is_none());
+    }
+
+    // --- EmailAddress -> Mailbox conversion ---
+
+    #[test]
+    fn test_email_address_to_mailbox_valid() {
+        let addr = EmailAddress {
+            name: Some("Test User".to_string()),
+            address: "test@example.com".to_string(),
+        };
+        let mailbox: Mailbox = addr.into();
+        assert_eq!(mailbox.name, Some("Test User".to_string()));
+    }
+
+    #[test]
+    fn test_email_address_to_mailbox_no_name() {
+        let addr = EmailAddress {
+            name: None,
+            address: "test@example.com".to_string(),
+        };
+        let mailbox: Mailbox = addr.into();
+        assert_eq!(mailbox.name, None);
+    }
+
+    #[test]
+    fn test_email_address_to_mailbox_invalid() {
+        let addr = EmailAddress {
+            name: Some("Bad".to_string()),
+            address: "not-valid".to_string(),
+        };
+        // Should not panic, falls back to unknown@example.com
+        let mailbox: Mailbox = addr.into();
+        assert_eq!(mailbox.name, Some("Bad".to_string()));
+    }
+
+    // --- Email serialization roundtrip ---
+
+    #[test]
+    fn test_email_serialization_roundtrip() {
+        let mut email = Email::new();
+        email.id = "42".to_string();
+        email.subject = "Test Subject".to_string();
+        email.from.push(EmailAddress { name: Some("Sender".to_string()), address: "sender@test.com".to_string() });
+        email.body_text = Some("Hello body".to_string());
+        email.seen = true;
+
+        let json = serde_json::to_string(&email).unwrap();
+        let deserialized: Email = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.id, "42");
+        assert_eq!(deserialized.subject, "Test Subject");
+        assert_eq!(deserialized.from.len(), 1);
+        assert_eq!(deserialized.from[0].address, "sender@test.com");
+        assert_eq!(deserialized.body_text, Some("Hello body".to_string()));
+        assert!(deserialized.seen);
+    }
+
+    #[test]
+    fn test_email_address_serialization() {
+        let addr = EmailAddress {
+            name: Some("Tes\"t".to_string()),
+            address: "test@example.com".to_string(),
+        };
+        let json = serde_json::to_string(&addr).unwrap();
+        let deser: EmailAddress = serde_json::from_str(&json).unwrap();
+        assert_eq!(deser.name.as_deref(), Some("Tes\"t"));
+        assert_eq!(deser.address, "test@example.com");
+    }
+
+    // --- FolderMetadata ---
+
+    #[test]
+    fn test_folder_metadata_new() {
+        let meta = FolderMetadata::new();
+        assert_eq!(meta.last_uid, 0);
+        assert_eq!(meta.total_messages, 0);
+        assert!(meta.downloaded_uids.is_empty());
+    }
+
+    // --- EmailAttachment ---
+
+    #[test]
+    fn test_email_attachment_serialization() {
+        let att = EmailAttachment {
+            filename: "test.txt".to_string(),
+            content_type: "text/plain".to_string(),
+            data: vec![72, 101, 108, 108, 111],
+        };
+        let json = serde_json::to_string(&att).unwrap();
+        let deser: EmailAttachment = serde_json::from_str(&json).unwrap();
+        assert_eq!(deser.filename, "test.txt");
+        assert_eq!(deser.data, vec![72, 101, 108, 108, 111]);
+    }
+
+    // --- Email seen flag from flags ---
+
+    #[test]
+    fn test_email_seen_from_flags() {
+        let mut email = Email::new();
+        email.flags = vec!["\\Seen".to_string(), "\\Flagged".to_string()];
+        assert!(email.flags.iter().any(|f| f == "\\Seen"));
     }
 }

@@ -106,8 +106,15 @@ impl FallbackCredentialManager {
         let key = self.derive_key(account_id);
         let encrypted = self.xor_encrypt(password.as_bytes(), &key);
         
-        std::fs::write(&file_path, encrypted)
+        std::fs::write(&file_path, &encrypted)
             .context("Failed to write encrypted password file")?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&file_path, std::fs::Permissions::from_mode(0o600))
+                .context("Failed to set credential file permissions")?;
+        }
 
         log::warn!("Password stored with fallback encryption for {} ({})", account_id, password_type);
         log::warn!("Note: For better security, install GNOME Keyring or similar");
@@ -201,5 +208,92 @@ impl SecureCredentials {
             Self::SystemKeyring(manager) => manager.delete_password(account_id, password_type),
             Self::Fallback(manager) => manager.delete_password(account_id, password_type),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_fallback() -> FallbackCredentialManager {
+        let dir = std::env::temp_dir().join("tuimail_cred_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        FallbackCredentialManager {
+            config_dir: dir.to_string_lossy().to_string(),
+        }
+    }
+
+    #[test]
+    fn test_xor_encrypt_decrypt_roundtrip() {
+        let mgr = test_fallback();
+        let key = mgr.derive_key("test@example.com");
+        let plaintext = b"my_secret_password";
+        let encrypted = mgr.xor_encrypt(plaintext, &key);
+        assert_ne!(&encrypted, plaintext);
+        let decrypted = mgr.xor_encrypt(&encrypted, &key);
+        assert_eq!(&decrypted, plaintext);
+    }
+
+    #[test]
+    fn test_derive_key_deterministic() {
+        let mgr = test_fallback();
+        let key1 = mgr.derive_key("user@example.com");
+        let key2 = mgr.derive_key("user@example.com");
+        assert_eq!(key1, key2);
+        assert_eq!(key1.len(), 32);
+    }
+
+    #[test]
+    fn test_derive_key_different_accounts() {
+        let mgr = test_fallback();
+        let key1 = mgr.derive_key("alice@example.com");
+        let key2 = mgr.derive_key("bob@example.com");
+        assert_ne!(key1, key2);
+    }
+
+    #[test]
+    fn test_store_and_retrieve_password() {
+        let mgr = test_fallback();
+        mgr.store_password("testuser@cred.com", "imap", "hunter2").unwrap();
+        let pass = mgr.get_password("testuser@cred.com", "imap").unwrap();
+        assert_eq!(pass, Some("hunter2".to_string()));
+        // Cleanup
+        mgr.delete_password("testuser@cred.com", "imap").unwrap();
+    }
+
+    #[test]
+    fn test_get_nonexistent_password() {
+        let mgr = test_fallback();
+        let pass = mgr.get_password("nobody@cred.com", "smtp").unwrap();
+        assert_eq!(pass, None);
+    }
+
+    #[test]
+    fn test_delete_password() {
+        let mgr = test_fallback();
+        mgr.store_password("deltest@cred.com", "imap", "pw").unwrap();
+        mgr.delete_password("deltest@cred.com", "imap").unwrap();
+        let pass = mgr.get_password("deltest@cred.com", "imap").unwrap();
+        assert_eq!(pass, None);
+    }
+
+    #[test]
+    fn test_delete_nonexistent_password() {
+        let mgr = test_fallback();
+        // Should not error
+        mgr.delete_password("ghost@cred.com", "imap").unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_credential_file_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let mgr = test_fallback();
+        mgr.store_password("permtest@cred.com", "imap", "secret").unwrap();
+        let path = format!("{}/permtest@cred.com_imap.enc", mgr.config_dir);
+        let metadata = std::fs::metadata(&path).unwrap();
+        let mode = metadata.permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        mgr.delete_password("permtest@cred.com", "imap").unwrap();
     }
 }

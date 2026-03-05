@@ -98,18 +98,73 @@ mod tests {
     fn test_grammar_checker_placeholder() {
         let checker = GrammarChecker::new().unwrap();
         let config = GrammarCheckConfig::default();
-        
+
         let test_text = "This is a test sentence.";
         let errors = checker.check_text(test_text, &config);
-        
+
         // In placeholder mode, should return no errors
         assert!(errors.is_empty());
-        
+
         let corrected = checker.correct_text(test_text);
         assert_eq!(corrected, test_text);
-        
+
         let stats = checker.get_stats(test_text, &config);
         assert_eq!(stats.error_count, 0);
         assert_eq!(stats.quality_score, 100.0);
+    }
+
+    #[test]
+    fn test_grammar_config_default_disabled() {
+        let config = GrammarCheckConfig::default();
+        assert!(!config.enabled);
+    }
+
+    #[test]
+    fn test_grammar_check_enabled_still_empty() {
+        let checker = GrammarChecker::new().unwrap();
+        let config = GrammarCheckConfig { enabled: true };
+        let errors = checker.check_text("Some text here.", &config);
+        assert!(errors.is_empty()); // placeholder always returns empty
+    }
+
+    #[test]
+    fn test_grammar_stats_sentence_counting() {
+        let checker = GrammarChecker::new().unwrap();
+        let config = GrammarCheckConfig::default();
+        let stats = checker.get_stats("Hello. How are you? I am fine!", &config);
+        assert_eq!(stats.sentence_count, 3);
+    }
+
+    #[test]
+    fn test_grammar_stats_empty_text() {
+        let checker = GrammarChecker::new().unwrap();
+        let config = GrammarCheckConfig::default();
+        let stats = checker.get_stats("", &config);
+        assert_eq!(stats.sentence_count, 0);
+        assert_eq!(stats.error_count, 0);
+        assert_eq!(stats.quality_score, 100.0);
+    }
+
+    #[test]
+    fn test_grammar_apply_correction_placeholder() {
+        let checker = GrammarChecker::new().unwrap();
+        let error = GrammarError {
+            message: "test error".to_string(),
+            start: 0,
+            end: 5,
+            replacements: vec!["fixed".to_string()],
+            source: "test".to_string(),
+        };
+        let result = checker.apply_correction("hello world", &error, 0);
+        assert_eq!(result, "hello world"); // placeholder returns original
+    }
+
+    #[test]
+    fn test_grammar_correct_text_identity() {
+        let checker = GrammarChecker::new().unwrap();
+        let texts = vec!["", "Hello!", "Multiple. Sentences. Here."];
+        for text in texts {
+            assert_eq!(checker.correct_text(text), text);
+        }
     }
 }

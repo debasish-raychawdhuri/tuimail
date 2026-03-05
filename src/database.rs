@@ -411,9 +411,7 @@ impl EmailDatabase {
         Ok(count > 0)
     }
 
-    pub fn save_email(&self, email: &Email) -> Result<()> {
-        // We need the account email - let's get it from the first from address or use a default
-        let account_email = email.from.get(0).map(|a| a.address.as_str()).unwrap_or("");
+    pub fn save_email(&self, email: &Email, account_email: &str) -> Result<()> {
         
         // Save the email
         self.conn.execute(
@@ -444,8 +442,8 @@ impl EmailDatabase {
         // Save attachments
         for attachment in &email.attachments {
             self.conn.execute(
-                "INSERT OR REPLACE INTO attachments (account_email, folder, email_uid, filename, content_type, data)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                "INSERT OR REPLACE INTO attachments (account_email, folder, email_uid, filename, content_type, data, size)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![
                     account_email,
                     email.folder,
@@ -453,6 +451,7 @@ impl EmailDatabase {
                     attachment.filename,
                     attachment.content_type,
                     attachment.data,
+                    attachment.data.len() as i64,
                 ],
             )?;
         }
@@ -1047,5 +1046,277 @@ impl EmailDatabase {
         }
         
         Ok(folders)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn test_db() -> EmailDatabase {
+        let db = EmailDatabase::new(std::path::Path::new(":memory:")).unwrap();
+        // Create sync_state table (normally created by main.rs or sync daemon)
+        db.conn.execute(
+            "CREATE TABLE IF NOT EXISTS sync_state (
+                account_email TEXT NOT NULL,
+                folder TEXT NOT NULL,
+                last_uid_seen INTEGER NOT NULL DEFAULT 0,
+                last_sync_timestamp INTEGER NOT NULL DEFAULT 0,
+                sync_in_progress BOOLEAN NOT NULL DEFAULT FALSE,
+                PRIMARY KEY(account_email, folder)
+            )",
+            [],
+        ).unwrap();
+        db
+    }
+
+    fn make_email(id: &str, subject: &str, folder: &str) -> Email {
+        Email {
+            id: id.to_string(),
+            subject: subject.to_string(),
+            from: vec![EmailAddress { name: Some("Sender".to_string()), address: "sender@test.com".to_string() }],
+            to: vec![EmailAddress { name: None, address: "recipient@test.com".to_string() }],
+            cc: vec![],
+            bcc: vec![],
+            date: chrono::Local::now(),
+            body_text: Some("Test body".to_string()),
+            body_html: None,
+            attachments: vec![],
+            flags: vec!["\\Seen".to_string()],
+            headers: HashMap::new(),
+            seen: true,
+            folder: folder.to_string(),
+        }
+    }
+
+    #[test]
+    fn test_database_creation() {
+        let db = test_db();
+        assert!(db.get_database_path().contains("memory"));
+    }
+
+    #[test]
+    fn test_save_and_load_email() {
+        let db = test_db();
+        let email = make_email("1", "Test Subject", "INBOX");
+        db.save_email(&email, "user@test.com").unwrap();
+
+        let loaded = db.load_emails("user@test.com", "INBOX").unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].subject, "Test Subject");
+        assert_eq!(loaded[0].id, "1");
+    }
+
+    #[test]
+    fn test_save_emails_batch() {
+        let db = test_db();
+        let emails = vec![
+            make_email("1", "First", "INBOX"),
+            make_email("2", "Second", "INBOX"),
+            make_email("3", "Third", "INBOX"),
+        ];
+        db.save_emails("user@test.com", "INBOX", &emails).unwrap();
+        let count = db.get_email_count("user@test.com", "INBOX").unwrap();
+        assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn test_email_exists() {
+        let db = test_db();
+        assert!(!db.email_exists("user@test.com", "INBOX", "1").unwrap());
+        let email = make_email("1", "Test", "INBOX");
+        db.save_email(&email, "user@test.com").unwrap();
+        assert!(db.email_exists("user@test.com", "INBOX", "1").unwrap());
+    }
+
+    #[test]
+    fn test_email_count_empty() {
+        let db = test_db();
+        assert_eq!(db.get_email_count("user@test.com", "INBOX").unwrap(), 0);
+    }
+
+    #[test]
+    fn test_email_count_multiple_folders() {
+        let db = test_db();
+        db.save_email(&make_email("1", "A", "INBOX"), "u@t.com").unwrap();
+        db.save_email(&make_email("2", "B", "INBOX"), "u@t.com").unwrap();
+        db.save_email(&make_email("3", "C", "Sent"), "u@t.com").unwrap();
+        assert_eq!(db.get_email_count("u@t.com", "INBOX").unwrap(), 2);
+        assert_eq!(db.get_email_count("u@t.com", "Sent").unwrap(), 1);
+    }
+
+    #[test]
+    fn test_save_email_with_attachment() {
+        let db = test_db();
+        let mut email = make_email("1", "With Attachment", "INBOX");
+        email.attachments.push(EmailAttachment {
+            filename: "test.txt".to_string(),
+            content_type: "text/plain".to_string(),
+            data: b"hello world".to_vec(),
+        });
+        db.save_email(&email, "user@test.com").unwrap();
+
+        let loaded = db.load_emails("user@test.com", "INBOX").unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].attachments.len(), 1);
+        assert_eq!(loaded[0].attachments[0].filename, "test.txt");
+        assert_eq!(loaded[0].attachments[0].data, b"hello world");
+    }
+
+    #[test]
+    fn test_save_email_replaces_existing() {
+        let db = test_db();
+        db.save_email(&make_email("1", "Original", "INBOX"), "u@t.com").unwrap();
+        db.save_email(&make_email("1", "Updated", "INBOX"), "u@t.com").unwrap();
+        let loaded = db.load_emails("u@t.com", "INBOX").unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].subject, "Updated");
+    }
+
+    #[test]
+    fn test_delete_emails_by_folder() {
+        let db = test_db();
+        db.save_email(&make_email("1", "A", "INBOX"), "u@t.com").unwrap();
+        db.save_email(&make_email("2", "B", "Sent"), "u@t.com").unwrap();
+        db.delete_emails_by_folder("u@t.com", "INBOX").unwrap();
+        assert_eq!(db.get_email_count("u@t.com", "INBOX").unwrap(), 0);
+        assert_eq!(db.get_email_count("u@t.com", "Sent").unwrap(), 1);
+    }
+
+    #[test]
+    fn test_message_id_exists() {
+        let db = test_db();
+        let mut email = make_email("1", "Test", "INBOX");
+        email.headers.insert("Message-ID".to_string(), "<unique@test.com>".to_string());
+        db.save_email(&email, "u@t.com").unwrap();
+        assert!(db.message_id_exists("u@t.com", "INBOX", "<unique@test.com>").unwrap());
+        assert!(!db.message_id_exists("u@t.com", "INBOX", "<nonexistent@test.com>").unwrap());
+    }
+
+    #[test]
+    fn test_folder_metadata() {
+        let db = test_db();
+        let (uid, total, sync) = db.load_folder_metadata("u@t.com", "INBOX").unwrap();
+        assert_eq!(uid, 0);
+        assert_eq!(total, 0);
+        assert_eq!(sync, 0);
+
+        db.save_folder_metadata("u@t.com", "INBOX", 100, 50).unwrap();
+        let (uid, total, _sync) = db.load_folder_metadata("u@t.com", "INBOX").unwrap();
+        assert_eq!(uid, 100);
+        assert_eq!(total, 50);
+    }
+
+    #[test]
+    fn test_get_last_uid_empty() {
+        let db = test_db();
+        assert_eq!(db.get_last_uid("u@t.com", "INBOX").unwrap(), 0);
+    }
+
+    #[test]
+    fn test_get_last_uid() {
+        let db = test_db();
+        db.save_email(&make_email("10", "A", "INBOX"), "u@t.com").unwrap();
+        db.save_email(&make_email("20", "B", "INBOX"), "u@t.com").unwrap();
+        db.save_email(&make_email("5", "C", "INBOX"), "u@t.com").unwrap();
+        assert_eq!(db.get_last_uid("u@t.com", "INBOX").unwrap(), 20);
+    }
+
+    #[test]
+    fn test_queue_and_get_operations() {
+        let db = test_db();
+        db.queue_email_operation("u@t.com", "mark_read", 1, "INBOX", None).unwrap();
+        db.queue_email_operation("u@t.com", "move", 2, "INBOX", Some("Archive")).unwrap();
+
+        let ops = db.get_pending_operations().unwrap();
+        assert_eq!(ops.len(), 2);
+        assert_eq!(ops[0].2, "mark_read");
+        assert_eq!(ops[1].2, "move");
+        assert_eq!(ops[1].5.as_deref(), Some("Archive"));
+    }
+
+    #[test]
+    fn test_mark_operation_processed() {
+        let db = test_db();
+        db.queue_email_operation("u@t.com", "mark_read", 1, "INBOX", None).unwrap();
+        let ops = db.get_pending_operations().unwrap();
+        assert_eq!(ops.len(), 1);
+        db.mark_operation_processed(ops[0].0).unwrap();
+        let ops = db.get_pending_operations().unwrap();
+        assert_eq!(ops.len(), 0);
+    }
+
+    #[test]
+    fn test_get_all_folders() {
+        let db = test_db();
+        db.save_email(&make_email("1", "A", "INBOX"), "u@a.com").unwrap();
+        db.save_email(&make_email("2", "B", "Sent"), "u@a.com").unwrap();
+        db.save_email(&make_email("1", "C", "INBOX"), "u@b.com").unwrap();
+        let folders = db.get_all_folders().unwrap();
+        assert_eq!(folders.len(), 3);
+    }
+
+    #[test]
+    fn test_vacuum() {
+        let db = test_db();
+        db.vacuum().unwrap();
+    }
+
+    #[test]
+    fn test_get_database_size() {
+        let db = test_db();
+        let size = db.get_database_size().unwrap();
+        assert!(size > 0);
+    }
+
+    #[test]
+    fn test_get_latest_email_timestamp_empty() {
+        let db = test_db();
+        assert_eq!(db.get_latest_email_timestamp("u@t.com", "INBOX").unwrap(), None);
+    }
+
+    #[test]
+    fn test_get_oldest_email_timestamp_empty() {
+        let db = test_db();
+        assert_eq!(db.get_oldest_email_timestamp("u@t.com", "INBOX").unwrap(), None);
+    }
+
+    #[test]
+    fn test_sync_state() {
+        let db = test_db();
+        let (uid, ts, in_progress) = db.get_sync_state("u@t.com", "INBOX").unwrap();
+        assert_eq!(uid, 0);
+        assert_eq!(ts, 0);
+        assert!(!in_progress);
+
+        db.save_sync_state("u@t.com", "INBOX", 50, 1234567890).unwrap();
+        let (uid, ts, in_progress) = db.get_sync_state("u@t.com", "INBOX").unwrap();
+        assert_eq!(uid, 50);
+        assert_eq!(ts, 1234567890);
+        assert!(!in_progress);
+    }
+
+    #[test]
+    fn test_set_sync_in_progress() {
+        let db = test_db();
+        db.save_sync_state("u@t.com", "INBOX", 10, 100).unwrap();
+        db.set_sync_in_progress("u@t.com", "INBOX", true).unwrap();
+        let (uid, ts, in_progress) = db.get_sync_state("u@t.com", "INBOX").unwrap();
+        assert!(in_progress);
+        assert_eq!(uid, 10);
+        assert_eq!(ts, 100);
+    }
+
+    #[test]
+    fn test_get_emails_paginated() {
+        let db = test_db();
+        for i in 1..=5 {
+            db.save_email(&make_email(&i.to_string(), &format!("Email {}", i), "INBOX"), "u@t.com").unwrap();
+        }
+        let page = db.get_emails_paginated("u@t.com", "INBOX", 0, 3).unwrap();
+        assert_eq!(page.len(), 3);
+        let page2 = db.get_emails_paginated("u@t.com", "INBOX", 3, 3).unwrap();
+        assert_eq!(page2.len(), 2);
     }
 }

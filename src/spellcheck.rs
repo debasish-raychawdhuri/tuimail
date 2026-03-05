@@ -74,41 +74,47 @@ impl SpellChecker {
                 words.insert(word.to_lowercase());
                 
                 // Also add capitalized version for sentence starts
-                let capitalized = format!("{}{}", 
-                    word.chars().next().unwrap().to_uppercase(),
-                    &word[1..]
-                );
-                words.insert(capitalized);
+                if let Some(first_char) = word.chars().next() {
+                    let capitalized = format!("{}{}",
+                        first_char.to_uppercase(),
+                        &word[first_char.len_utf8()..]
+                    );
+                    words.insert(capitalized);
+                }
             }
         }
-        
+
         // Load technical and business terms relevant to email
         for line in TECHNICAL_TERMS.lines() {
             let word = line.trim();
             if !word.is_empty() {
                 words.insert(word.to_lowercase());
-                
+
                 // Add capitalized version
-                let capitalized = format!("{}{}", 
-                    word.chars().next().unwrap().to_uppercase(),
-                    &word[1..]
-                );
-                words.insert(capitalized);
+                if let Some(first_char) = word.chars().next() {
+                    let capitalized = format!("{}{}",
+                        first_char.to_uppercase(),
+                        &word[first_char.len_utf8()..]
+                    );
+                    words.insert(capitalized);
+                }
             }
         }
-        
+
         // Load additional common words that might not be in top 10k
         for line in ADDITIONAL_COMMON.lines() {
             let word = line.trim();
             if !word.is_empty() {
                 words.insert(word.to_lowercase());
-                
+
                 // Add capitalized version
-                let capitalized = format!("{}{}", 
-                    word.chars().next().unwrap().to_uppercase(),
-                    &word[1..]
-                );
-                words.insert(capitalized);
+                if let Some(first_char) = word.chars().next() {
+                    let capitalized = format!("{}{}",
+                        first_char.to_uppercase(),
+                        &word[first_char.len_utf8()..]
+                    );
+                    words.insert(capitalized);
+                }
             }
         }
         
@@ -598,5 +604,243 @@ mod tests {
         assert_eq!(errors.len(), 0, "Should have 0 errors for correct text");
         assert_eq!(stats.misspelled_words, 0, "Stats should show 0 misspelled words");
         assert_eq!(stats.accuracy, 100.0, "Accuracy should be 100% for correct text");
+    }
+
+    #[test]
+    fn test_word_extraction_with_positions() {
+        let text = "hello world";
+        let words = SpellChecker::extract_words(text);
+        assert_eq!(words[0].position, 0);
+        assert_eq!(words[1].position, 6);
+    }
+
+    #[test]
+    fn test_word_extraction_with_apostrophes_and_hyphens() {
+        let text = "don't self-aware";
+        let words = SpellChecker::extract_words(text);
+        assert_eq!(words.len(), 2);
+        assert_eq!(words[0].word, "don't");
+        assert_eq!(words[1].word, "self-aware");
+    }
+
+    #[test]
+    fn test_word_extraction_empty_and_whitespace() {
+        assert_eq!(SpellChecker::extract_words("").len(), 0);
+        assert_eq!(SpellChecker::extract_words("   ").len(), 0);
+        assert_eq!(SpellChecker::extract_words("123 456").len(), 0);
+    }
+
+    #[test]
+    fn test_word_extraction_punctuation() {
+        let text = "Hello, world! How are you?";
+        let words = SpellChecker::extract_words(text);
+        assert_eq!(words.len(), 5);
+        assert_eq!(words[0].word, "Hello");
+        assert_eq!(words[4].word, "you");
+    }
+
+    #[test]
+    fn test_is_correct_empty_word() {
+        let config = SpellCheckConfig::default();
+        let checker = SpellChecker::new(&config).unwrap();
+        assert!(checker.is_correct(""));
+    }
+
+    #[test]
+    fn test_is_correct_case_insensitive() {
+        let config = SpellCheckConfig::default();
+        let checker = SpellChecker::new(&config).unwrap();
+        assert!(checker.is_correct("The"));
+        assert!(checker.is_correct("THE"));
+        assert!(checker.is_correct("the"));
+    }
+
+    #[test]
+    fn test_personal_dictionary() {
+        let config = SpellCheckConfig::default();
+        let mut checker = SpellChecker::new(&config).unwrap();
+        assert!(!checker.is_correct("tuimail"));
+        checker.add_to_personal_dictionary("tuimail");
+        assert!(checker.is_correct("tuimail"));
+        assert!(checker.is_correct("TUIMAIL"));
+    }
+
+    #[test]
+    fn test_suggest_empty_word() {
+        let config = SpellCheckConfig::default();
+        let checker = SpellChecker::new(&config).unwrap();
+        assert!(checker.suggest("").is_empty());
+    }
+
+    #[test]
+    fn test_common_corrections() {
+        let config = SpellCheckConfig::default();
+        let checker = SpellChecker::new(&config).unwrap();
+        let corrected = checker.apply_common_corrections("teh");
+        assert_eq!(corrected, "the");
+        let corrected = checker.apply_common_corrections("recieve");
+        assert_eq!(corrected, "receive");
+        let corrected = checker.apply_common_corrections("definately");
+        assert_eq!(corrected, "definitely");
+    }
+
+    #[test]
+    fn test_common_corrections_no_match() {
+        let config = SpellCheckConfig::default();
+        let checker = SpellChecker::new(&config).unwrap();
+        let word = "hello";
+        let corrected = checker.apply_common_corrections(word);
+        assert_eq!(corrected, word);
+    }
+
+    #[test]
+    fn test_should_skip_url_and_email() {
+        let config = SpellCheckConfig::default();
+        let checker = SpellChecker::new(&config).unwrap();
+        assert!(checker.should_skip_word("http://example.com", &config));
+        assert!(checker.should_skip_word("www.example.com", &config));
+        assert!(checker.should_skip_word("user@domain.com", &config));
+    }
+
+    #[test]
+    fn test_should_skip_single_chars() {
+        let config = SpellCheckConfig::default();
+        let checker = SpellChecker::new(&config).unwrap();
+        // "a" and "I" should NOT be skipped
+        assert!(!checker.should_skip_word("a", &config));
+        assert!(!checker.should_skip_word("I", &config));
+        // Other single chars should be skipped
+        assert!(checker.should_skip_word("x", &config));
+    }
+
+    #[test]
+    fn test_ignore_numbers_config() {
+        let config = SpellCheckConfig {
+            ignore_numbers: true,
+            ..SpellCheckConfig::default()
+        };
+        let checker = SpellChecker::new(&config).unwrap();
+        assert!(checker.should_skip_word("test123", &config));
+
+        let config_no = SpellCheckConfig {
+            ignore_numbers: false,
+            ..SpellCheckConfig::default()
+        };
+        assert!(!checker.should_skip_word("test123", &config_no));
+    }
+
+    #[test]
+    fn test_ignore_uppercase_config() {
+        let config = SpellCheckConfig {
+            ignore_uppercase: true,
+            ..SpellCheckConfig::default()
+        };
+        let checker = SpellChecker::new(&config).unwrap();
+        assert!(checker.should_skip_word("HTTP", &config));
+        // Single uppercase letter "I" should not be skipped
+        assert!(!checker.should_skip_word("I", &config));
+    }
+
+    #[test]
+    fn test_check_text_finds_misspellings() {
+        let config = SpellCheckConfig::default();
+        let checker = SpellChecker::new(&config).unwrap();
+        let errors = checker.check_text("This is a asdfghjkl test", &config);
+        assert!(errors.len() >= 1);
+        assert!(errors.iter().any(|e| e.word == "asdfghjkl"));
+    }
+
+    #[test]
+    fn test_check_text_no_errors_for_correct_text() {
+        let config = SpellCheckConfig::default();
+        let checker = SpellChecker::new(&config).unwrap();
+        let errors = checker.check_text("Hello world", &config);
+        assert_eq!(errors.len(), 0);
+    }
+
+    #[test]
+    fn test_get_suggestions_for_word_respects_max() {
+        let config = SpellCheckConfig {
+            max_suggestions: 2,
+            ..SpellCheckConfig::default()
+        };
+        let checker = SpellChecker::new(&config).unwrap();
+        let suggestions = checker.get_suggestions_for_word("helo", &config);
+        assert!(suggestions.len() <= 2);
+    }
+
+    #[test]
+    fn test_is_similar_quick_same_word() {
+        let config = SpellCheckConfig::default();
+        let checker = SpellChecker::new(&config).unwrap();
+        // Same word should NOT be considered similar (to avoid self-suggestion)
+        assert!(!checker.is_similar_quick("hello", "hello"));
+    }
+
+    #[test]
+    fn test_is_similar_quick_one_char_diff() {
+        let config = SpellCheckConfig::default();
+        let checker = SpellChecker::new(&config).unwrap();
+        assert!(checker.is_similar_quick("hello", "hallo"));
+        assert!(checker.is_similar_quick("cat", "bat"));
+    }
+
+    #[test]
+    fn test_is_similar_quick_insertion_deletion() {
+        let config = SpellCheckConfig::default();
+        let checker = SpellChecker::new(&config).unwrap();
+        assert!(checker.is_similar_quick("helo", "hello"));
+        assert!(checker.is_similar_quick("hello", "hell"));
+    }
+
+    #[test]
+    fn test_is_similar_quick_too_different() {
+        let config = SpellCheckConfig::default();
+        let checker = SpellChecker::new(&config).unwrap();
+        assert!(!checker.is_similar_quick("abc", "xyz"));
+        assert!(!checker.is_similar_quick("short", "toolong"));
+    }
+
+    #[test]
+    fn test_calculate_similarity() {
+        let config = SpellCheckConfig::default();
+        let checker = SpellChecker::new(&config).unwrap();
+        assert_eq!(checker.calculate_similarity("hello", "hello"), 1.0);
+        assert_eq!(checker.calculate_similarity("", "abc"), 0.0);
+        assert_eq!(checker.calculate_similarity("abc", ""), 0.0);
+        let sim = checker.calculate_similarity("hello", "hallo");
+        assert!(sim > 0.5);
+    }
+
+    #[test]
+    fn test_stats_with_misspelled_text() {
+        let config = SpellCheckConfig::default();
+        let checker = SpellChecker::new(&config).unwrap();
+        let text = "hello asdfghjkl world";
+        let stats = checker.get_stats(text, &config);
+        assert_eq!(stats.total_words, 3);
+        assert!(stats.misspelled_words >= 1);
+        assert!(stats.accuracy < 100.0);
+    }
+
+    #[test]
+    fn test_stats_empty_text() {
+        let config = SpellCheckConfig::default();
+        let checker = SpellChecker::new(&config).unwrap();
+        let stats = checker.get_stats("", &config);
+        assert_eq!(stats.total_words, 0);
+        assert_eq!(stats.accuracy, 100.0);
+    }
+
+    #[test]
+    fn test_extract_words_static_matches_extract_words() {
+        let text = "Hello world test";
+        let static_words = SpellChecker::extract_words_static(text);
+        let instance_words = SpellChecker::extract_words(text);
+        assert_eq!(static_words.len(), instance_words.len());
+        for (a, b) in static_words.iter().zip(instance_words.iter()) {
+            assert_eq!(a.word, b.word);
+            assert_eq!(a.position, b.position);
+        }
     }
 }

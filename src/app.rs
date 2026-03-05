@@ -219,6 +219,18 @@ pub struct App {
     pub address_fields_dirty: bool,
 }
 
+/// Clamp a byte position to the nearest valid UTF-8 char boundary (rounding down).
+fn clamp_to_char_boundary(s: &str, pos: usize) -> usize {
+    if pos >= s.len() {
+        return s.len();
+    }
+    let mut p = pos;
+    while p > 0 && !s.is_char_boundary(p) {
+        p -= 1;
+    }
+    p
+}
+
 impl App {
     pub fn new(config: Config, database: std::sync::Arc<crate::database::EmailDatabase>) -> Self {
         // Debug logging
@@ -873,9 +885,17 @@ impl App {
                 if self.selected_grammar_suggestion < error.replacements.len() {
                     let suggestion = error.replacements[self.selected_grammar_suggestion].clone();
                     let original_text = match self.compose_field {
-                        ComposeField::Subject => self.compose_email.subject[error.start..error.end].to_string(),
+                        ComposeField::Subject => {
+                            if !self.compose_email.subject.is_char_boundary(error.start) || !self.compose_email.subject.is_char_boundary(error.end) {
+                                continue;
+                            }
+                            self.compose_email.subject[error.start..error.end].to_string()
+                        }
                         ComposeField::Body => {
                             if let Some(ref body) = self.compose_email.body_text {
+                                if !body.is_char_boundary(error.start) || !body.is_char_boundary(error.end) {
+                                    continue;
+                                }
                                 body[error.start..error.end].to_string()
                             } else {
                                 continue;
@@ -2689,7 +2709,10 @@ impl App {
                         self.mark_address_field_dirty();
                     }
                     ComposeField::Subject => {
-                        self.compose_email.subject.push(c);
+                        let cursor_pos = self.compose_cursor_pos.min(self.compose_email.subject.len());
+                        let cursor_pos = clamp_to_char_boundary(&self.compose_email.subject, cursor_pos);
+                        self.compose_email.subject.insert(cursor_pos, c);
+                        self.compose_cursor_pos = cursor_pos + c.len_utf8();
                         // Mark keystroke for debounced spell checking (no immediate check)
                         self.mark_keystroke();
                         // Grammar check only runs manually (Alt+T)
@@ -2748,7 +2771,17 @@ impl App {
                         }
                     }
                     ComposeField::Subject => {
-                        self.compose_email.subject.pop();
+                        let subject = &mut self.compose_email.subject;
+                        if self.compose_cursor_pos > 0 && !subject.is_empty() {
+                            let cursor_pos = self.compose_cursor_pos.min(subject.len());
+                            let cursor_pos = clamp_to_char_boundary(subject, cursor_pos);
+                            // Find the start of the previous character
+                            let prev_pos = clamp_to_char_boundary(subject, cursor_pos.saturating_sub(1));
+                            if prev_pos < cursor_pos {
+                                subject.drain(prev_pos..cursor_pos);
+                                self.compose_cursor_pos = prev_pos;
+                            }
+                        }
                         // Mark keystroke for debounced spell checking
                         self.mark_keystroke();
                         // Grammar check only runs manually (Alt+T)
@@ -2815,7 +2848,12 @@ impl App {
                             self.compose_cursor_pos -= 1;
                         }
                     }
-                    _ => {}
+                    ComposeField::Subject => {
+                        if self.compose_cursor_pos > 0 {
+                            let new_pos = clamp_to_char_boundary(&self.compose_email.subject, self.compose_cursor_pos.saturating_sub(1));
+                            self.compose_cursor_pos = new_pos;
+                        }
+                    }
                 }
                 Ok(())
             }
@@ -2844,7 +2882,17 @@ impl App {
                             }
                         }
                     }
-                    _ => {}
+                    ComposeField::Subject => {
+                        let subject = &self.compose_email.subject;
+                        if self.compose_cursor_pos < subject.len() {
+                            // Move past the current character
+                            let mut new_pos = self.compose_cursor_pos + 1;
+                            while new_pos < subject.len() && !subject.is_char_boundary(new_pos) {
+                                new_pos += 1;
+                            }
+                            self.compose_cursor_pos = new_pos;
+                        }
+                    }
                 }
                 Ok(())
             }
@@ -2853,7 +2901,8 @@ impl App {
                 if self.compose_field == ComposeField::Body {
                     if let Some(body) = &self.compose_email.body_text {
                         // Find the beginning of the current line
-                        let text_before_cursor = &body[..self.compose_cursor_pos];
+                        let pos = clamp_to_char_boundary(body, self.compose_cursor_pos);
+                        let text_before_cursor = &body[..pos];
                         if let Some(last_newline) = text_before_cursor.rfind('\n') {
                             self.compose_cursor_pos = last_newline + 1;
                         } else {
@@ -2868,7 +2917,9 @@ impl App {
                 if self.compose_field == ComposeField::Body {
                     if let Some(body) = &self.compose_email.body_text {
                         // Find the end of the current line
-                        let text_after_cursor = &body[self.compose_cursor_pos..];
+                        let pos = clamp_to_char_boundary(body, self.compose_cursor_pos);
+                        self.compose_cursor_pos = pos;
+                        let text_after_cursor = &body[pos..];
                         if let Some(next_newline) = text_after_cursor.find('\n') {
                             self.compose_cursor_pos += next_newline;
                         } else {
@@ -4368,5 +4419,61 @@ impl App {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_clamp_to_char_boundary_ascii() {
+        let s = "hello";
+        assert_eq!(clamp_to_char_boundary(s, 0), 0);
+        assert_eq!(clamp_to_char_boundary(s, 3), 3);
+        assert_eq!(clamp_to_char_boundary(s, 5), 5);
+    }
+
+    #[test]
+    fn test_clamp_to_char_boundary_beyond_len() {
+        let s = "abc";
+        assert_eq!(clamp_to_char_boundary(s, 10), 3);
+    }
+
+    #[test]
+    fn test_clamp_to_char_boundary_empty() {
+        assert_eq!(clamp_to_char_boundary("", 0), 0);
+        assert_eq!(clamp_to_char_boundary("", 5), 0);
+    }
+
+    #[test]
+    fn test_clamp_to_char_boundary_multibyte() {
+        let s = "héllo"; // é is 2 bytes
+        assert_eq!(clamp_to_char_boundary(s, 0), 0);
+        assert_eq!(clamp_to_char_boundary(s, 1), 1); // start of é
+        assert_eq!(clamp_to_char_boundary(s, 2), 1); // mid é -> clamp back to 1
+        assert_eq!(clamp_to_char_boundary(s, 3), 3); // 'l'
+    }
+
+    #[test]
+    fn test_clamp_to_char_boundary_cjk() {
+        let s = "日本語"; // each char is 3 bytes
+        assert_eq!(clamp_to_char_boundary(s, 0), 0);
+        assert_eq!(clamp_to_char_boundary(s, 1), 0); // mid 日 -> 0
+        assert_eq!(clamp_to_char_boundary(s, 2), 0); // mid 日 -> 0
+        assert_eq!(clamp_to_char_boundary(s, 3), 3); // start of 本
+        assert_eq!(clamp_to_char_boundary(s, 4), 3); // mid 本 -> 3
+        assert_eq!(clamp_to_char_boundary(s, 6), 6); // start of 語
+    }
+
+    #[test]
+    fn test_clamp_to_char_boundary_emoji() {
+        let s = "a😀b"; // 😀 is 4 bytes
+        assert_eq!(clamp_to_char_boundary(s, 0), 0);
+        assert_eq!(clamp_to_char_boundary(s, 1), 1); // start of 😀
+        assert_eq!(clamp_to_char_boundary(s, 2), 1); // mid 😀
+        assert_eq!(clamp_to_char_boundary(s, 3), 1); // mid 😀
+        assert_eq!(clamp_to_char_boundary(s, 4), 1); // mid 😀
+        assert_eq!(clamp_to_char_boundary(s, 5), 5); // 'b'
     }
 }
