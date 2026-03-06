@@ -1319,4 +1319,82 @@ mod tests {
         let page2 = db.get_emails_paginated("u@t.com", "INBOX", 3, 3).unwrap();
         assert_eq!(page2.len(), 2);
     }
+
+    #[test]
+    fn test_seen_status_persists_after_reload() {
+        // This tests the exact bug: mark email as read, reload from DB,
+        // verify it's still marked as read (not reset to unread).
+        let db = test_db();
+        let email = make_email("1", "Test", "INBOX");
+        assert!(email.seen); // make_email creates seen=true by default
+
+        // Save as unseen
+        let mut unseen_email = email.clone();
+        unseen_email.seen = false;
+        unseen_email.flags = vec![];
+        db.save_email(&unseen_email, "u@t.com").unwrap();
+
+        // Verify it loads as unseen
+        let loaded = db.load_emails("u@t.com", "INBOX").unwrap();
+        assert!(!loaded[0].seen, "Email should start as unseen");
+
+        // Mark as seen via update_email_seen_status (this is what mark_current_email_as_read does)
+        db.update_email_seen_status("u@t.com", "INBOX", 1, true).unwrap();
+
+        // Reload from database (simulates switching away and back to folder)
+        let reloaded = db.load_emails("u@t.com", "INBOX").unwrap();
+        assert!(reloaded[0].seen, "Email should still be seen after reload from DB");
+
+        // Also verify via get_recent_emails (the other load path used by folder switching)
+        let recent = db.get_recent_emails("u@t.com", "INBOX", 100).unwrap();
+        assert!(recent[0].seen, "Email should be seen when loaded via get_recent_emails");
+
+        // Also verify via get_all_emails
+        let all = db.get_all_emails("u@t.com", "INBOX").unwrap();
+        assert!(all[0].seen, "Email should be seen when loaded via get_all_emails");
+    }
+
+    #[test]
+    fn test_seen_status_must_update_same_db_it_reads_from() {
+        // This reproduces the root cause: if seen status is updated in one DB
+        // but emails are loaded from a different DB, the status is lost.
+        let db1 = test_db(); // simulates the main database
+        let db2 = test_db(); // simulates the per-account database
+
+        let mut email = make_email("1", "Test", "INBOX");
+        email.seen = false;
+        email.flags = vec![];
+
+        // Both databases start with the same unseen email
+        db1.save_email(&email, "u@t.com").unwrap();
+        db2.save_email(&email, "u@t.com").unwrap();
+
+        // BUG scenario: only update db1 (main), but load from db2 (per-account)
+        db1.update_email_seen_status("u@t.com", "INBOX", 1, true).unwrap();
+        let from_db2 = db2.load_emails("u@t.com", "INBOX").unwrap();
+        assert!(!from_db2[0].seen, "Without fix: db2 still shows unseen because only db1 was updated");
+
+        // FIX scenario: update BOTH databases
+        db2.update_email_seen_status("u@t.com", "INBOX", 1, true).unwrap();
+        let from_db2_fixed = db2.load_emails("u@t.com", "INBOX").unwrap();
+        assert!(from_db2_fixed[0].seen, "With fix: db2 now shows seen because both DBs were updated");
+    }
+
+    #[test]
+    fn test_mark_unread_persists_after_reload() {
+        let db = test_db();
+        let email = make_email("1", "Test", "INBOX");
+        db.save_email(&email, "u@t.com").unwrap();
+
+        // Start as seen (make_email default)
+        let loaded = db.load_emails("u@t.com", "INBOX").unwrap();
+        assert!(loaded[0].seen);
+
+        // Mark as unread
+        db.update_email_seen_status("u@t.com", "INBOX", 1, false).unwrap();
+
+        // Reload and verify
+        let reloaded = db.load_emails("u@t.com", "INBOX").unwrap();
+        assert!(!reloaded[0].seen, "Email should be unseen after marking unread and reloading");
+    }
 }
