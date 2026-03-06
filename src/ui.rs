@@ -282,7 +282,7 @@ fn format_file_size(bytes: usize) -> String {
 
 fn render_scrollable_email_body(f: &mut Frame, email: &Email, area: Rect, scroll_offset: usize) {
     let raw_content = email.body_text.as_deref().unwrap_or("No content");
-    let content = expand_tabs_and_normalize(raw_content);
+    let content = reflow_email_text(raw_content);
 
     let body = Paragraph::new(content.as_str())
         .block(Block::default()
@@ -292,6 +292,52 @@ fn render_scrollable_email_body(f: &mut Frame, email: &Email, area: Rect, scroll
         .scroll((scroll_offset as u16, 0));
 
     f.render_widget(body, area);
+}
+
+/// Reflow hard-wrapped plain text email body for display.
+///
+/// Joins lines that were hard-wrapped at ~76 columns back into paragraphs,
+/// preserving intentional paragraph breaks (blank lines) and structured lines
+/// (lines starting with whitespace, bullets, quotes, etc.).
+fn reflow_email_text(text: &str) -> String {
+    let normalized = expand_tabs_and_normalize(text);
+    let mut result = String::with_capacity(normalized.len());
+    let mut prev_line: Option<&str> = None;
+
+    for line in normalized.split('\n') {
+        if let Some(prev) = prev_line {
+            if prev.is_empty() {
+                // Previous line was blank — paragraph break
+                result.push('\n');
+            } else if line.is_empty() {
+                // Current line is blank — end previous paragraph
+                result.push_str(prev);
+                result.push('\n');
+            } else if line.starts_with(' ')
+                || line.starts_with('>')
+                || line.starts_with('-')
+                || line.starts_with('*')
+                || line.starts_with('#')
+            {
+                // Current line is structured (indented, quoted, list, etc.) — don't join
+                result.push_str(prev);
+                result.push('\n');
+            } else {
+                // Join: previous line was likely hard-wrapped
+                result.push_str(prev);
+                if prev.ends_with(' ') {
+                    // Already has trailing space
+                } else {
+                    result.push(' ');
+                }
+            }
+        }
+        prev_line = Some(line);
+    }
+    if let Some(prev) = prev_line {
+        result.push_str(prev);
+    }
+    result
 }
 
 /// Expand tab characters to spaces at standard 8-column tab stops and strip \r.
@@ -356,18 +402,6 @@ fn render_email_header(f: &mut Frame, email: &Email, area: Rect) {
     f.render_widget(header, area);
 }
 
-#[allow(dead_code)]
-fn render_email_body(f: &mut Frame, email: &Email, area: Rect) {
-    let raw_content = email.body_text.as_deref().unwrap_or("No content");
-    let content = expand_tabs_and_normalize(raw_content);
-
-    let body = Paragraph::new(content.as_str())
-        .block(Block::default().borders(Borders::ALL))
-        .wrap(Wrap { trim: false })
-        .scroll((0, 0)); // Add scroll support
-    
-    f.render_widget(body, area);
-}
 
 fn render_compose_mode(f: &mut Frame, app: &App, area: Rect) {
     // If showing spell suggestions, render the suggestion popup
