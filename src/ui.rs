@@ -42,7 +42,7 @@ fn render_title_bar(f: &mut Frame, app: &App, area: Rect) {
     let titles = vec![inbox_title.as_str(), "Compose", "Settings", "Help"];
     let tabs = Tabs::new(titles.iter().cloned().map(Line::from).collect())
         .block(Block::default().borders(Borders::BOTTOM))
-        .highlight_style(Style::default().fg(Color::Yellow))
+        .highlight_style(Style::default().fg(Color::Black).bg(Color::White).add_modifier(Modifier::BOLD))
         .select(match app.mode {
             AppMode::Normal | AppMode::ViewEmail | AppMode::FolderList | AppMode::DeleteConfirm | AppMode::Search => 0,
             AppMode::Compose => 1,
@@ -95,7 +95,7 @@ fn render_folder_list(f: &mut Frame, app: &App, area: Rect) {
                     let prefix = if *expanded { "▼ " } else { "▶ " };
                     let display_text = format!("{}{} <{}>", prefix, name, email);
                     let style = if i == app.selected_folder_item_idx {
-                        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                        Style::default().fg(Color::Black).bg(Color::White).add_modifier(Modifier::BOLD)
                     } else {
                         Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
                     };
@@ -118,7 +118,7 @@ fn render_folder_list(f: &mut Frame, app: &App, area: Rect) {
 
     let folders = List::new(items)
         .block(Block::default().title("Accounts & Folders").borders(Borders::ALL))
-        .highlight_style(Style::default().add_modifier(Modifier::BOLD));
+        .highlight_style(Style::default().fg(Color::Black).bg(Color::White).add_modifier(Modifier::BOLD));
 
     // Add scrolling support
     let mut state = ratatui::widgets::ListState::default();
@@ -181,7 +181,7 @@ fn render_email_list(f: &mut Frame, app: &App, area: Rect) {
 
     let emails = List::new(items)
         .block(Block::default().title(title).borders(Borders::ALL))
-        .highlight_style(Style::default().add_modifier(Modifier::BOLD));
+        .highlight_style(Style::default().fg(Color::Black).bg(Color::White).add_modifier(Modifier::BOLD));
 
     // Add scrolling support
     let mut state = ratatui::widgets::ListState::default();
@@ -232,7 +232,7 @@ fn render_email_attachments(f: &mut Frame, app: &App, email: &Email, area: Rect)
         .map(|(i, attachment)| {
             let size = format_file_size(attachment.data.len());
             let style = if Some(i) == app.selected_attachment_idx {
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                Style::default().fg(Color::Black).bg(Color::White).add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(Color::Cyan)
             };
@@ -250,7 +250,7 @@ fn render_email_attachments(f: &mut Frame, app: &App, email: &Email, area: Rect)
         .block(Block::default()
             .title("Attachments (Tab to select, 's' to save)")
             .borders(Borders::ALL))
-        .highlight_style(Style::default().add_modifier(Modifier::BOLD));
+        .highlight_style(Style::default().fg(Color::Black).bg(Color::White).add_modifier(Modifier::BOLD));
 
     let mut state = ratatui::widgets::ListState::default();
     if let Some(selected) = app.selected_attachment_idx {
@@ -415,25 +415,25 @@ fn render_compose_mode(f: &mut Frame, app: &App, area: Rect) {
     };
     
     let to_style = if app.compose_field == crate::app::ComposeField::To {
-        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+        Style::default().fg(Color::Black).bg(Color::White).add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(Color::Gray)
     };
     
     let cc_style = if app.compose_field == crate::app::ComposeField::Cc {
-        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+        Style::default().fg(Color::Black).bg(Color::White).add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(Color::Gray)
     };
     
     let bcc_style = if app.compose_field == crate::app::ComposeField::Bcc {
-        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+        Style::default().fg(Color::Black).bg(Color::White).add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(Color::Gray)
     };
     
     let subject_style = if app.compose_field == crate::app::ComposeField::Subject {
-        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+        Style::default().fg(Color::Black).bg(Color::White).add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(Color::Gray)
     };
@@ -709,7 +709,7 @@ fn render_spell_suggestions(f: &mut Frame, app: &App, area: Rect) {
             .enumerate()
             .map(|(i, suggestion)| {
                 let style = if i == app.selected_spell_suggestion {
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                    Style::default().fg(Color::Black).bg(Color::White).add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(Color::White)
                 };
@@ -722,7 +722,7 @@ fn render_spell_suggestions(f: &mut Frame, app: &App, area: Rect) {
                 .title(format!("Suggestions for '{}'", error.word))
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::Yellow)))
-            .highlight_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+            .highlight_style(Style::default().fg(Color::Black).bg(Color::White).add_modifier(Modifier::BOLD));
 
         f.render_widget(suggestions_list, popup_area);
 
@@ -804,7 +804,7 @@ fn render_grammar_suggestions(f: &mut Frame, app: &App, area: Rect) {
                 .title(format!("Grammar suggestions for '{}'", original_text))
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::Cyan)))
-            .highlight_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
+            .highlight_style(Style::default().fg(Color::Black).bg(Color::White).add_modifier(Modifier::BOLD));
 
         f.render_widget(suggestions_list, popup_area);
 
@@ -885,7 +885,7 @@ fn render_file_browser(f: &mut Frame, app: &App, area: Rect) {
             .title(title)
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Green)))
-        .highlight_style(Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD));
+        .highlight_style(Style::default().fg(Color::Black).bg(Color::White).add_modifier(Modifier::BOLD));
     
     // Create help text
     let help_area = Layout::default()
@@ -974,7 +974,7 @@ fn render_compose_attachments(f: &mut Frame, app: &App, area: Rect) {
         .map(|(i, attachment)| {
             let size = format_file_size(attachment.data.len());
             let style = if Some(i) == app.selected_attachment_idx {
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                Style::default().fg(Color::Black).bg(Color::White).add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(Color::Green)
             };
@@ -992,7 +992,7 @@ fn render_compose_attachments(f: &mut Frame, app: &App, area: Rect) {
         .block(Block::default()
             .title("Attachments (Ctrl+A to add, Ctrl+X to remove)")
             .borders(Borders::ALL))
-        .highlight_style(Style::default().add_modifier(Modifier::BOLD));
+        .highlight_style(Style::default().fg(Color::Black).bg(Color::White).add_modifier(Modifier::BOLD));
 
     let mut state = ratatui::widgets::ListState::default();
     if let Some(selected) = app.selected_attachment_idx {
@@ -1013,7 +1013,7 @@ fn render_folder_list_mode(f: &mut Frame, app: &App, area: Rect) {
                     let prefix = if *expanded { "▼ " } else { "▶ " };
                     let display_text = format!("{}{} <{}>", prefix, name, email);
                     let style = if i == app.selected_folder_item_idx {
-                        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                        Style::default().fg(Color::Black).bg(Color::White).add_modifier(Modifier::BOLD)
                     } else {
                         Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
                     };
@@ -1038,7 +1038,7 @@ fn render_folder_list_mode(f: &mut Frame, app: &App, area: Rect) {
         .block(Block::default()
             .title("Select Account or Folder (↑/↓: Navigate, Enter: Select/Expand, Esc: Cancel)")
             .borders(Borders::ALL))
-        .highlight_style(Style::default().add_modifier(Modifier::BOLD));
+        .highlight_style(Style::default().fg(Color::Black).bg(Color::White).add_modifier(Modifier::BOLD));
 
     // Add scrolling support
     let mut state = ratatui::widgets::ListState::default();
@@ -1266,7 +1266,7 @@ fn render_search_mode(f: &mut Frame, app: &App, area: Rect) {
         .enumerate()
         .map(|(i, email)| {
             let style = if Some(i) == app.selected_search_result_idx {
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                Style::default().fg(Color::Black).bg(Color::White).add_modifier(Modifier::BOLD)
             } else if !email.seen {
                 Style::default().fg(Color::Green)
             } else {
@@ -1290,7 +1290,7 @@ fn render_search_mode(f: &mut Frame, app: &App, area: Rect) {
 
     let results_list = List::new(items)
         .block(Block::default().title(title).borders(Borders::ALL))
-        .highlight_style(Style::default().add_modifier(Modifier::BOLD));
+        .highlight_style(Style::default().fg(Color::Black).bg(Color::White).add_modifier(Modifier::BOLD));
 
     let mut state = ratatui::widgets::ListState::default();
     if let Some(selected) = app.selected_search_result_idx {
