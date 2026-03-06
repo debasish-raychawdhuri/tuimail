@@ -1027,6 +1027,67 @@ impl EmailDatabase {
         }
     }
 
+    /// Search emails by subject, from, or body text
+    pub fn search_emails(&self, account_email: &str, query: &str, limit: usize) -> Result<Vec<Email>> {
+        let pattern = format!("%{}%", query);
+        let mut stmt = self.conn.prepare(
+            "SELECT uid, message_id, subject, from_addresses, to_addresses,
+                    cc_addresses, bcc_addresses, date_received, body_text, body_html,
+                    flags, headers, seen, folder
+             FROM emails
+             WHERE account_email = ?1
+               AND (subject LIKE ?2 OR from_addresses LIKE ?2 OR body_text LIKE ?2 OR to_addresses LIKE ?2)
+             ORDER BY date_received DESC
+             LIMIT ?3",
+        )?;
+
+        let email_rows = stmt.query_map(params![account_email, pattern, limit], |row| {
+            Ok((
+                row.get::<_, u32>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, i64>(7)?,
+                row.get::<_, Option<String>>(8)?,
+                row.get::<_, Option<String>>(9)?,
+                row.get::<_, String>(10)?,
+                row.get::<_, String>(11)?,
+                row.get::<_, bool>(12)?,
+                row.get::<_, String>(13)?,
+            ))
+        })?;
+
+        let mut emails = Vec::new();
+        for row_result in email_rows {
+            let (uid, _message_id, subject, from_json, to_json, cc_json, bcc_json,
+                 date_timestamp, body_text, body_html, flags_json, headers_json, seen, folder) = row_result?;
+
+            let email = Email {
+                id: uid.to_string(),
+                subject,
+                from: serde_json::from_str(&from_json).unwrap_or_default(),
+                to: serde_json::from_str(&to_json).unwrap_or_default(),
+                cc: serde_json::from_str(&cc_json).unwrap_or_default(),
+                bcc: serde_json::from_str(&bcc_json).unwrap_or_default(),
+                date: chrono::DateTime::from_timestamp(date_timestamp, 0)
+                    .unwrap_or_else(|| chrono::Local::now().into())
+                    .with_timezone(&chrono::Local),
+                body_text,
+                body_html,
+                attachments: Vec::new(),
+                flags: serde_json::from_str(&flags_json).unwrap_or_default(),
+                headers: serde_json::from_str(&headers_json).unwrap_or_default(),
+                seen,
+                folder,
+            };
+            emails.push(email);
+        }
+        Ok(emails)
+    }
+
     /// Get all account/folder combinations in the database
     pub fn get_all_folders(&self) -> Result<Vec<(String, String)>> {
         let mut stmt = self.conn.prepare(
@@ -1378,6 +1439,72 @@ mod tests {
         db2.update_email_seen_status("u@t.com", "INBOX", 1, true).unwrap();
         let from_db2_fixed = db2.load_emails("u@t.com", "INBOX").unwrap();
         assert!(from_db2_fixed[0].seen, "With fix: db2 now shows seen because both DBs were updated");
+    }
+
+    #[test]
+    fn test_search_by_subject() {
+        let db = test_db();
+        db.save_email(&make_email("1", "Meeting tomorrow", "INBOX"), "u@t.com").unwrap();
+        db.save_email(&make_email("2", "Lunch plans", "INBOX"), "u@t.com").unwrap();
+        db.save_email(&make_email("3", "Meeting notes", "Sent"), "u@t.com").unwrap();
+
+        let results = db.search_emails("u@t.com", "meeting", 100).unwrap();
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(|e| e.subject.to_lowercase().contains("meeting")));
+    }
+
+    #[test]
+    fn test_search_by_body() {
+        let db = test_db();
+        let mut email = make_email("1", "Hello", "INBOX");
+        email.body_text = Some("Let's discuss the budget report".to_string());
+        db.save_email(&email, "u@t.com").unwrap();
+        db.save_email(&make_email("2", "Other", "INBOX"), "u@t.com").unwrap();
+
+        let results = db.search_emails("u@t.com", "budget", 100).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].subject, "Hello");
+    }
+
+    #[test]
+    fn test_search_no_results() {
+        let db = test_db();
+        db.save_email(&make_email("1", "Hello", "INBOX"), "u@t.com").unwrap();
+        let results = db.search_emails("u@t.com", "zzzznonexistent", 100).unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_search_respects_limit() {
+        let db = test_db();
+        for i in 1..=10 {
+            db.save_email(&make_email(&i.to_string(), &format!("Test email {}", i), "INBOX"), "u@t.com").unwrap();
+        }
+        let results = db.search_emails("u@t.com", "Test", 3).unwrap();
+        assert_eq!(results.len(), 3);
+    }
+
+    #[test]
+    fn test_search_across_folders() {
+        let db = test_db();
+        db.save_email(&make_email("1", "Project update", "INBOX"), "u@t.com").unwrap();
+        db.save_email(&make_email("2", "Project review", "Sent"), "u@t.com").unwrap();
+        db.save_email(&make_email("3", "Unrelated", "INBOX"), "u@t.com").unwrap();
+
+        let results = db.search_emails("u@t.com", "project", 100).unwrap();
+        assert_eq!(results.len(), 2);
+        // Results should include folder info
+        let folders: Vec<&str> = results.iter().map(|e| e.folder.as_str()).collect();
+        assert!(folders.contains(&"INBOX"));
+        assert!(folders.contains(&"Sent"));
+    }
+
+    #[test]
+    fn test_search_case_insensitive() {
+        let db = test_db();
+        db.save_email(&make_email("1", "URGENT Meeting", "INBOX"), "u@t.com").unwrap();
+        let results = db.search_emails("u@t.com", "urgent", 100).unwrap();
+        assert_eq!(results.len(), 1);
     }
 
     #[test]

@@ -87,6 +87,7 @@ pub enum AppMode {
     AccountSettings,
     Help,
     DeleteConfirm,
+    Search,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -217,6 +218,14 @@ pub struct App {
     
     // Address field parsing optimization
     pub address_fields_dirty: bool,
+
+    // Search state
+    pub search_query: String,
+    pub search_cursor_pos: usize,
+    pub search_results: Vec<Email>,
+    pub selected_search_result_idx: Option<usize>,
+    pub pre_search_emails: Vec<Email>,           // emails before search, to restore
+    pub pre_search_selected_idx: Option<usize>,
 }
 
 /// Clamp a byte position to the nearest valid UTF-8 char boundary (rounding down).
@@ -379,6 +388,14 @@ impl App {
             
             // Address field parsing optimization
             address_fields_dirty: false,
+
+            // Search state
+            search_query: String::new(),
+            search_cursor_pos: 0,
+            search_results: Vec::new(),
+            selected_search_result_idx: None,
+            pre_search_emails: Vec::new(),
+            pre_search_selected_idx: None,
         }
     }
 
@@ -2393,6 +2410,7 @@ impl App {
             AppMode::AccountSettings => self.handle_settings_mode(key),
             AppMode::Help => self.handle_help_mode(key),
             AppMode::DeleteConfirm => self.handle_delete_confirm_mode(key),
+            AppMode::Search => self.handle_search_mode(key),
         }
     }
 
@@ -2455,6 +2473,16 @@ impl App {
             }
             KeyCode::Char('s') => {
                 self.mode = AppMode::AccountSettings;
+                Ok(())
+            }
+            KeyCode::Char('/') => {
+                self.mode = AppMode::Search;
+                self.search_query.clear();
+                self.search_cursor_pos = 0;
+                self.search_results.clear();
+                self.selected_search_result_idx = None;
+                self.pre_search_emails = self.emails.clone();
+                self.pre_search_selected_idx = self.selected_email_idx;
                 Ok(())
             }
             KeyCode::Char('?') => {
@@ -3176,6 +3204,146 @@ impl App {
 
     fn show_delete_confirmation(&mut self) {
         self.mode = AppMode::DeleteConfirm;
+    }
+
+    fn handle_search_mode(&mut self, key: KeyEvent) -> AppResult<()> {
+        match key.code {
+            KeyCode::Esc => {
+                // Cancel search, restore original email list
+                self.emails = self.pre_search_emails.drain(..).collect();
+                self.selected_email_idx = self.pre_search_selected_idx;
+                self.mode = AppMode::Normal;
+                Ok(())
+            }
+            KeyCode::Enter => {
+                // Accept search results and go to normal mode
+                if !self.search_results.is_empty() {
+                    self.emails = self.search_results.clone();
+                    self.selected_email_idx = if self.emails.is_empty() { None } else { Some(0) };
+                }
+                self.pre_search_emails.clear();
+                self.mode = AppMode::Normal;
+                Ok(())
+            }
+            KeyCode::Char(c) => {
+                let pos = self.search_cursor_pos.min(self.search_query.len());
+                self.search_query.insert(pos, c);
+                self.search_cursor_pos = pos + c.len_utf8();
+                self.perform_search();
+                Ok(())
+            }
+            KeyCode::Backspace => {
+                if self.search_cursor_pos > 0 {
+                    let pos = self.search_cursor_pos.min(self.search_query.len());
+                    let prev = clamp_to_char_boundary(&self.search_query, pos.saturating_sub(1));
+                    if prev < pos {
+                        self.search_query.drain(prev..pos);
+                        self.search_cursor_pos = prev;
+                    }
+                }
+                self.perform_search();
+                Ok(())
+            }
+            KeyCode::Left => {
+                if self.search_cursor_pos > 0 {
+                    self.search_cursor_pos = clamp_to_char_boundary(
+                        &self.search_query,
+                        self.search_cursor_pos.saturating_sub(1),
+                    );
+                }
+                Ok(())
+            }
+            KeyCode::Right => {
+                if self.search_cursor_pos < self.search_query.len() {
+                    let mut new_pos = self.search_cursor_pos + 1;
+                    while new_pos < self.search_query.len()
+                        && !self.search_query.is_char_boundary(new_pos)
+                    {
+                        new_pos += 1;
+                    }
+                    self.search_cursor_pos = new_pos;
+                }
+                Ok(())
+            }
+            KeyCode::Up => {
+                // Navigate search results
+                if let Some(idx) = self.selected_search_result_idx {
+                    if idx > 0 {
+                        self.selected_search_result_idx = Some(idx - 1);
+                    }
+                }
+                Ok(())
+            }
+            KeyCode::Down => {
+                if let Some(idx) = self.selected_search_result_idx {
+                    if idx + 1 < self.search_results.len() {
+                        self.selected_search_result_idx = Some(idx + 1);
+                    }
+                } else if !self.search_results.is_empty() {
+                    self.selected_search_result_idx = Some(0);
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn perform_search(&mut self) {
+        if self.search_query.is_empty() {
+            self.search_results.clear();
+            self.selected_search_result_idx = None;
+            return;
+        }
+
+        let account_email = if self.current_account_idx < self.config.accounts.len() {
+            self.config.accounts[self.current_account_idx].email.clone()
+        } else {
+            return;
+        };
+
+        // Search in the per-account database
+        if let Some(account_db) = self.get_account_database() {
+            match account_db.search_emails(&account_email, &self.search_query, 100) {
+                Ok(results) => {
+                    self.search_results = results;
+                    self.selected_search_result_idx = if self.search_results.is_empty() {
+                        None
+                    } else {
+                        Some(0)
+                    };
+                }
+                Err(e) => {
+                    debug_log(&format!("Search error: {}", e));
+                    // Fall back to in-memory search of current emails
+                    self.search_in_memory();
+                }
+            }
+        } else {
+            // No per-account database, search in memory
+            self.search_in_memory();
+        }
+    }
+
+    fn search_in_memory(&mut self) {
+        let query_lower = self.search_query.to_lowercase();
+        self.search_results = self.pre_search_emails
+            .iter()
+            .filter(|email| {
+                email.subject.to_lowercase().contains(&query_lower)
+                    || email.from.iter().any(|a| {
+                        a.address.to_lowercase().contains(&query_lower)
+                            || a.name.as_deref().unwrap_or("").to_lowercase().contains(&query_lower)
+                    })
+                    || email.to.iter().any(|a| a.address.to_lowercase().contains(&query_lower))
+                    || email.body_text.as_deref().unwrap_or("").to_lowercase().contains(&query_lower)
+            })
+            .cloned()
+            .collect();
+        self.selected_search_result_idx = if self.search_results.is_empty() {
+            None
+        } else {
+            Some(0)
+        };
     }
 
     pub fn select_next_email(&mut self) {

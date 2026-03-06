@@ -44,7 +44,7 @@ fn render_title_bar(f: &mut Frame, app: &App, area: Rect) {
         .block(Block::default().borders(Borders::BOTTOM))
         .highlight_style(Style::default().fg(Color::Yellow))
         .select(match app.mode {
-            AppMode::Normal | AppMode::ViewEmail | AppMode::FolderList | AppMode::DeleteConfirm => 0,
+            AppMode::Normal | AppMode::ViewEmail | AppMode::FolderList | AppMode::DeleteConfirm | AppMode::Search => 0,
             AppMode::Compose => 1,
             AppMode::AccountSettings => 2,
             AppMode::Help => 3,
@@ -67,6 +67,7 @@ fn render_main_content(f: &mut Frame, app: &App, area: Rect) {
         AppMode::AccountSettings => render_settings_mode(f, app, area),
         AppMode::Help => render_help_mode(f, app, area),
         AppMode::DeleteConfirm => render_delete_confirm_mode(f, app, area),
+        AppMode::Search => render_search_mode(f, app, area),
     }
 }
 
@@ -1205,7 +1206,8 @@ fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
     
     // Show current mode and help
     match app.mode {
-        AppMode::Normal => text.push_str("Press 'r' to refresh, 'n' for next account, 'f' for folders, 'c' to compose, '?' for help"),
+        AppMode::Normal => text.push_str("r=Refresh, /=Search, n=Next account, f=Folders, c=Compose, ?=Help"),
+        AppMode::Search => text.push_str("Type to search | Enter=Accept results | Esc=Cancel | ↑↓=Navigate results"),
         AppMode::FolderList => text.push_str("Use ↑↓ to navigate folders, Enter to select, Esc to cancel"),
         AppMode::Compose => text.push_str("Tab to switch fields, Ctrl+S to send, Esc to cancel"),
         AppMode::ViewEmail => text.push_str("r=Reply, a=Reply All, f=Forward, d=Delete, ↑↓=Scroll, Esc=Back"),
@@ -1224,6 +1226,82 @@ fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
         .style(Style::default().bg(Color::Blue).fg(Color::White));
     
     f.render_widget(status, area);
+}
+
+fn render_search_mode(f: &mut Frame, app: &App, area: Rect) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3), // Search input
+            Constraint::Min(0),   // Results
+        ])
+        .split(area);
+
+    // Search input bar
+    let cursor_display = if app.search_cursor_pos <= app.search_query.len() {
+        byte_to_char_pos(&app.search_query, app.search_cursor_pos)
+    } else {
+        app.search_query.chars().count()
+    };
+
+    let search_text = format!("/{}", app.search_query);
+    let search_input = Paragraph::new(search_text)
+        .block(Block::default().title("Search Emails").borders(Borders::ALL))
+        .style(Style::default().fg(Color::Yellow));
+    f.render_widget(search_input, chunks[0]);
+
+    // Set cursor position (account for the '/' prefix)
+    f.set_cursor(
+        chunks[0].x + 1 + cursor_display as u16 + 1, // +1 for border, +1 for '/'
+        chunks[0].y + 1, // +1 for border
+    );
+
+    // Search results list
+    let result_count = app.search_results.len();
+    let title = if app.search_query.is_empty() {
+        "Results".to_string()
+    } else {
+        format!("Results ({} found)", result_count)
+    };
+
+    let items: Vec<ListItem> = app
+        .search_results
+        .iter()
+        .enumerate()
+        .map(|(i, email)| {
+            let style = if Some(i) == app.selected_search_result_idx {
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+            } else if !email.seen {
+                Style::default().fg(Color::Green)
+            } else {
+                Style::default()
+            };
+
+            let date = email.date.format("%m-%d %H:%M").to_string();
+            let from = email.from.first().map_or("Unknown", |addr| {
+                if let Some(ref name) = addr.name {
+                    if !name.is_empty() { name } else { &addr.address }
+                } else {
+                    &addr.address
+                }
+            });
+            let folder_tag = format!("[{}]", email.folder);
+            let content = format!("{:<12} {:<20} {:<12} {}",
+                date, from, folder_tag, email.subject);
+            ListItem::new(content).style(style)
+        })
+        .collect();
+
+    let results_list = List::new(items)
+        .block(Block::default().title(title).borders(Borders::ALL))
+        .highlight_style(Style::default().add_modifier(Modifier::BOLD));
+
+    let mut state = ratatui::widgets::ListState::default();
+    if let Some(selected) = app.selected_search_result_idx {
+        state.select(Some(selected));
+    }
+
+    f.render_stateful_widget(results_list, chunks[1], &mut state);
 }
 
 // Helper function to create a centered rect
