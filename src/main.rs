@@ -362,9 +362,11 @@ async fn main() -> Result<()> {
     
     // Create app state
     let mut app = App::new(config, database.clone());
-    
-    // Initialize sync tracker with database data (simplified approach)
-    // The sync tracker will be populated as emails are fetched
+
+    // Load emails for the default account's INBOX on startup
+    if let Err(e) = app.load_emails_for_account_folder(app.current_account_idx, "INBOX") {
+        eprintln!("Warning: Failed to load initial inbox: {}", e);
+    }
     
     // Debug logging
     if std::env::var("EMAIL_DEBUG").is_ok() {
