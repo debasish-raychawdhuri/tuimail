@@ -9,7 +9,7 @@ mod spellcheck;
 mod ui;
 mod test_parsing;
 
-use std::io::{self, Write};
+use std::io;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -503,17 +503,14 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> AppRe
     
     // Add database polling timer
     let mut last_db_poll = std::time::Instant::now();
-    const DB_POLL_INTERVAL: Duration = Duration::from_secs(5); // Poll database every 5 seconds (reduced from 2)
-    
+    const DB_POLL_INTERVAL: Duration = Duration::from_secs(30); // Poll database every 30 seconds
+
     // Initial UI draw on startup
     terminal.draw(|frame| ui(frame, app))?;
-    
+
     loop {
         // Poll database for changes periodically
         if last_db_poll.elapsed() >= DB_POLL_INTERVAL {
-            // Check for new emails from background fetcher (legacy)
-            app.check_for_new_emails();
-            
             if let Err(e) = app.refresh_emails_from_database() {
                 // Log error but don't fail the UI
                 if std::env::var("EMAIL_DEBUG").is_ok() {
@@ -522,46 +519,18 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> AppRe
                         .create(true)
                         .write(true)
                         .append(true)
-                        .open(log_file) 
+                        .open(log_file)
                     {
                         use std::io::Write;
-                        let _ = writeln!(file, "[{}] Database poll error: {}", 
+                        let _ = writeln!(file, "[{}] Database poll error: {}",
                             Local::now().format("%Y-%m-%d %H:%M:%S"), e);
                     }
                 }
             }
             last_db_poll = std::time::Instant::now();
         }
-        
-        // Only update spell checking in compose mode and when there's been a keystroke
-        if matches!(app.mode, app::AppMode::Compose) {
-            app.update_spell_check();
-        }
-        
-        // Update address field parsing (debounced)
-        if matches!(app.mode, app::AppMode::Compose) {
-            app.update_address_fields();
-        }
-        
-        // DISABLED: Draw UI only if needed (optimization) - this was causing continuous redraws
-        // if app.needs_redraw {
-        //     if let Err(e) = terminal.draw(|frame| ui(frame, app)) {
-        //         consecutive_errors += 1;
-        //         if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
-        //             return Err(AppError::IoError(e));
-        //         }
-        //         continue;
-        //     }
-        //     app.needs_redraw = false; // Reset redraw flag after successful draw
-        // }
-        
-        // Ensure the terminal output is flushed
-        io::stdout().flush().ok();
-        
-        // Reset consecutive error counter on successful draw
-        consecutive_errors = 0;
-        
-        // Handle events
+
+        // Handle events — block for up to 1 second
         if event::poll(Duration::from_secs(1))? {
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
@@ -577,13 +546,20 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> AppRe
                     } else {
                         // Reset error counter on successful operation
                         consecutive_errors = 0;
+                    }
 
-                        // Draw UI only after key events
-                        if let Err(e) = terminal.draw(|frame| ui(frame, app)) {
-                            consecutive_errors += 1;
-                            if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
-                                return Err(AppError::IoError(e));
-                            }
+                    // Run compose-mode updates only after key presses in compose mode
+                    if matches!(app.mode, app::AppMode::Compose) {
+                        app.update_spell_check();
+                        app.update_address_fields();
+                        app.process_grammar_responses().await;
+                    }
+
+                    // Draw UI after key events
+                    if let Err(e) = terminal.draw(|frame| ui(frame, app)) {
+                        consecutive_errors += 1;
+                        if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
+                            return Err(AppError::IoError(e));
                         }
                     }
                     
@@ -607,23 +583,8 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> AppRe
                 _ => {}
             }
         }
-        
-        // Process any pending grammar check responses
-        app.process_grammar_responses().await;
-        
-        // Update app state with error handling
-        if let Err(e) = app.tick() {
-            app.show_error(&format!("Update error: {}", e));
-            consecutive_errors += 1;
-            
-            if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
-                return Err(e);
-            }
-        } else {
-            // Reset error counter on successful tick
-            if consecutive_errors > 0 {
-                consecutive_errors = 0;
-            }
-        }
+
+        // Tick: clear timed-out messages
+        let _ = app.tick();
     }
 }

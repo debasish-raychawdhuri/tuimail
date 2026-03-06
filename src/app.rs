@@ -2004,16 +2004,16 @@ impl App {
                     }
                 }
                 
-                // Sleep for shorter intervals to check operations more frequently
-                // Check operations every 2 seconds, full sync every 30 seconds
-                for i in 0..15 {
+                // Sleep between syncs, checking for pending operations periodically
+                // Check operations every 5 seconds, full sync every 60 seconds
+                for i in 0..12 {
                     if !running_flag.load(Ordering::Relaxed) {
                         break;
                     }
-                    std::thread::sleep(Duration::from_secs(2));
-                    
-                    // Check for pending operations every 2 seconds
-                    if i < 14 { // Don't check on the last iteration to avoid duplicate processing
+                    std::thread::sleep(Duration::from_secs(5));
+
+                    // Check for pending operations every 5 seconds
+                    if i < 11 {
                         match database.get_pending_operations() {
                             Ok(operations) => {
                                 if !operations.is_empty() {
