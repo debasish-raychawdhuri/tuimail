@@ -281,16 +281,44 @@ fn format_file_size(bytes: usize) -> String {
 }
 
 fn render_scrollable_email_body(f: &mut Frame, email: &Email, area: Rect, scroll_offset: usize) {
-    let content = email.body_text.as_deref().unwrap_or("No content");
-    
-    let body = Paragraph::new(content)
+    let raw_content = email.body_text.as_deref().unwrap_or("No content");
+    let content = expand_tabs_and_normalize(raw_content);
+
+    let body = Paragraph::new(content.as_str())
         .block(Block::default()
             .borders(Borders::ALL)
             .title("Body (↑/↓ to scroll, PgUp/PgDn for fast scroll)"))
         .wrap(Wrap { trim: false })
         .scroll((scroll_offset as u16, 0));
-    
+
     f.render_widget(body, area);
+}
+
+/// Expand tab characters to spaces at standard 8-column tab stops and strip \r.
+fn expand_tabs_and_normalize(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut col = 0;
+    for ch in text.chars() {
+        match ch {
+            '\t' => {
+                let spaces = 8 - (col % 8);
+                for _ in 0..spaces {
+                    result.push(' ');
+                }
+                col += spaces;
+            }
+            '\n' => {
+                result.push('\n');
+                col = 0;
+            }
+            '\r' => {}
+            c => {
+                result.push(c);
+                col += 1;
+            }
+        }
+    }
+    result
 }
 
 fn render_email_header(f: &mut Frame, email: &Email, area: Rect) {
@@ -330,9 +358,10 @@ fn render_email_header(f: &mut Frame, email: &Email, area: Rect) {
 
 #[allow(dead_code)]
 fn render_email_body(f: &mut Frame, email: &Email, area: Rect) {
-    let content = email.body_text.as_deref().unwrap_or("No content");
-    
-    let body = Paragraph::new(content)
+    let raw_content = email.body_text.as_deref().unwrap_or("No content");
+    let content = expand_tabs_and_normalize(raw_content);
+
+    let body = Paragraph::new(content.as_str())
         .block(Block::default().borders(Borders::ALL))
         .wrap(Wrap { trim: false })
         .scroll((0, 0)); // Add scroll support
