@@ -561,13 +561,13 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> AppRe
         
         // Handle events
         if event::poll(Duration::from_secs(1))? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press {
+            match event::read()? {
+                Event::Key(key) if key.kind == KeyEventKind::Press => {
                     // Handle input with error recovery
                     if let Err(e) = app.handle_key_event(key) {
                         app.show_error(&format!("Error: {}", e));
                         consecutive_errors += 1;
-                        
+
                         // If we have too many consecutive errors, exit
                         if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
                             return Err(e);
@@ -575,7 +575,7 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> AppRe
                     } else {
                         // Reset error counter on successful operation
                         consecutive_errors = 0;
-                        
+
                         // Draw UI only after key events
                         if let Err(e) = terminal.draw(|frame| ui(frame, app)) {
                             consecutive_errors += 1;
@@ -593,6 +593,16 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> AppRe
                         return Ok(());
                     }
                 }
+                Event::Resize(_, _) => {
+                    // Terminal was resized — redraw the UI to fit the new dimensions
+                    if let Err(e) = terminal.draw(|frame| ui(frame, app)) {
+                        consecutive_errors += 1;
+                        if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
+                            return Err(AppError::IoError(e));
+                        }
+                    }
+                }
+                _ => {}
             }
         }
         
