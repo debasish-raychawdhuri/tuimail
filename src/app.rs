@@ -1612,6 +1612,30 @@ impl App {
         }
     }
 
+    /// Get the per-account database for the current account
+    fn get_account_database(&self) -> Option<crate::database::EmailDatabase> {
+        let account_email = &self.config.accounts.get(self.current_account_idx)?.email;
+        let cache_dir = format!("{}/.cache/tuimail/{}",
+            dirs::home_dir().unwrap_or_default().display(),
+            account_email.replace('@', "_at_").replace('.', "_"));
+        let db_path = std::path::PathBuf::from(&cache_dir).join("emails.db");
+        crate::database::EmailDatabase::new(&db_path).ok()
+    }
+
+    /// Update seen status in both the main and per-account databases
+    fn update_seen_in_all_databases(&self, account_email: &str, folder: &str, uid: u32, seen: bool) {
+        // Update main database
+        if let Err(e) = self.database.update_email_seen_status(account_email, folder, uid, seen) {
+            debug_log(&format!("Failed to update main database seen status: {}", e));
+        }
+        // Update per-account database (this is what gets read when switching back to the folder)
+        if let Some(account_db) = self.get_account_database() {
+            if let Err(e) = account_db.update_email_seen_status(account_email, folder, uid, seen) {
+                debug_log(&format!("Failed to update account database seen status: {}", e));
+            }
+        }
+    }
+
     /// Mark current email as read (queue operation)
     pub fn mark_current_email_as_read(&mut self) -> AppResult<()> {
         if let Some(idx) = self.selected_email_idx {
@@ -1621,20 +1645,25 @@ impl App {
                     let email_uid: u32 = email.id.parse().unwrap_or(0);
                     let email_folder = email.folder.clone();
                     let account_email = self.config.accounts[self.current_account_idx].email.clone();
-                    
+
                     // 1. Queue the operation for server sync (use email's folder directly)
                     self.queue_email_operation_for_folder("mark_read", email_uid, &email_folder, None)?;
-                    
-                    // 2. Update local database immediately
-                    if let Err(e) = self.database.update_email_seen_status(&account_email, &email_folder, email_uid, true) {
-                        debug_log(&format!("Failed to update local database: {}", e));
-                    }
-                    
+
+                    // 2. Update both databases immediately
+                    self.update_seen_in_all_databases(&account_email, &email_folder, email_uid, true);
+
                     // 3. Update UI state immediately
                     self.emails[idx].seen = true;
-                    
+
+                    // Also update the account's email list so it persists across folder switches
+                    if let Some(account_data) = self.accounts.get_mut(&self.current_account_idx) {
+                        if let Some(acct_email) = account_data.emails.iter_mut().find(|e| e.id == self.emails[idx].id && e.folder == email_folder) {
+                            acct_email.seen = true;
+                        }
+                    }
+
                     debug_log(&format!("Marked email UID {} as read locally and queued server sync", email_uid));
-                    
+
                     // 4. Trigger immediate background processing for responsiveness
                     self.trigger_immediate_sync()?;
                 }
@@ -1652,20 +1681,25 @@ impl App {
                     let email_uid: u32 = email.id.parse().unwrap_or(0);
                     let email_folder = email.folder.clone();
                     let account_email = self.config.accounts[self.current_account_idx].email.clone();
-                    
+
                     // 1. Queue the operation for server sync (use email's folder directly)
                     self.queue_email_operation_for_folder("mark_unread", email_uid, &email_folder, None)?;
-                    
-                    // 2. Update local database immediately
-                    if let Err(e) = self.database.update_email_seen_status(&account_email, &email_folder, email_uid, false) {
-                        debug_log(&format!("Failed to update local database: {}", e));
-                    }
-                    
+
+                    // 2. Update both databases immediately
+                    self.update_seen_in_all_databases(&account_email, &email_folder, email_uid, false);
+
                     // 3. Update UI state immediately
                     self.emails[idx].seen = false;
-                    
+
+                    // Also update the account's email list so it persists across folder switches
+                    if let Some(account_data) = self.accounts.get_mut(&self.current_account_idx) {
+                        if let Some(acct_email) = account_data.emails.iter_mut().find(|e| e.id == self.emails[idx].id && e.folder == email_folder) {
+                            acct_email.seen = false;
+                        }
+                    }
+
                     debug_log(&format!("Marked email UID {} as unread locally and queued server sync", email_uid));
-                    
+
                     // 4. Trigger immediate background processing for responsiveness
                     self.trigger_immediate_sync()?;
                 }
@@ -1805,17 +1839,21 @@ impl App {
                                         match client.mark_as_read(&temp_email) {
                                             Ok(_) => {
                                                 debug_log(&format!("✅ IMAP mark_as_read succeeded for email {}", email_uid));
-                                                // Update database
-                                                match database.update_email_seen_status(&account_email, &folder, email_uid, true) {
-                                                    Ok(_) => {
-                                                        debug_log(&format!("✅ Database update succeeded for email {}", email_uid));
-                                                        Ok(())
-                                                    }
-                                                    Err(e) => {
-                                                        debug_log(&format!("❌ Database update failed for email {}: {}", email_uid, e));
-                                                        Err(e)
+                                                // Update main database
+                                                if let Err(e) = database.update_email_seen_status(&account_email, &folder, email_uid, true) {
+                                                    debug_log(&format!("❌ Main DB update failed for email {}: {}", email_uid, e));
+                                                }
+                                                // Update per-account database
+                                                let acct_cache_dir = format!("{}/.cache/tuimail/{}",
+                                                    dirs::home_dir().unwrap_or_default().display(),
+                                                    account_email.replace('@', "_at_").replace('.', "_"));
+                                                let acct_db_path = std::path::PathBuf::from(&acct_cache_dir).join("emails.db");
+                                                if let Ok(acct_db) = crate::database::EmailDatabase::new(&acct_db_path) {
+                                                    if let Err(e) = acct_db.update_email_seen_status(&account_email, &folder, email_uid, true) {
+                                                        debug_log(&format!("❌ Account DB update failed for email {}: {}", email_uid, e));
                                                     }
                                                 }
+                                                Ok(())
                                             }
                                             Err(e) => {
                                                 debug_log(&format!("❌ IMAP mark_as_read FAILED for email {}: {}", email_uid, e));
@@ -1841,10 +1879,19 @@ impl App {
                                             flags: Vec::new(),
                                             headers: std::collections::HashMap::new(),
                                         };
-                                        
+
                                         match client.mark_as_unread(&temp_email) {
                                             Ok(_) => {
-                                                database.update_email_seen_status(&account_email, &folder, email_uid, false)
+                                                let _ = database.update_email_seen_status(&account_email, &folder, email_uid, false);
+                                                // Update per-account database
+                                                let acct_cache_dir = format!("{}/.cache/tuimail/{}",
+                                                    dirs::home_dir().unwrap_or_default().display(),
+                                                    account_email.replace('@', "_at_").replace('.', "_"));
+                                                let acct_db_path = std::path::PathBuf::from(&acct_cache_dir).join("emails.db");
+                                                if let Ok(acct_db) = crate::database::EmailDatabase::new(&acct_db_path) {
+                                                    let _ = acct_db.update_email_seen_status(&account_email, &folder, email_uid, false);
+                                                }
+                                                Ok(())
                                             }
                                             Err(e) => Err(e.into())
                                         }
@@ -1982,7 +2029,17 @@ impl App {
                                                     };
                                                     
                                                     match client.mark_as_read(&temp_email) {
-                                                        Ok(_) => database.update_email_seen_status(&account_email, &folder, email_uid, true),
+                                                        Ok(_) => {
+                                                            let _ = database.update_email_seen_status(&account_email, &folder, email_uid, true);
+                                                            let acct_cache_dir = format!("{}/.cache/tuimail/{}",
+                                                                dirs::home_dir().unwrap_or_default().display(),
+                                                                account_email.replace('@', "_at_").replace('.', "_"));
+                                                            let acct_db_path = std::path::PathBuf::from(&acct_cache_dir).join("emails.db");
+                                                            if let Ok(acct_db) = crate::database::EmailDatabase::new(&acct_db_path) {
+                                                                let _ = acct_db.update_email_seen_status(&account_email, &folder, email_uid, true);
+                                                            }
+                                                            Ok(())
+                                                        }
                                                         Err(e) => Err(e.into())
                                                     }
                                                 }
@@ -2003,9 +2060,19 @@ impl App {
                                                         flags: Vec::new(),
                                                         headers: std::collections::HashMap::new(),
                                                     };
-                                                    
+
                                                     match client.mark_as_unread(&temp_email) {
-                                                        Ok(_) => database.update_email_seen_status(&account_email, &folder, email_uid, false),
+                                                        Ok(_) => {
+                                                            let _ = database.update_email_seen_status(&account_email, &folder, email_uid, false);
+                                                            let acct_cache_dir = format!("{}/.cache/tuimail/{}",
+                                                                dirs::home_dir().unwrap_or_default().display(),
+                                                                account_email.replace('@', "_at_").replace('.', "_"));
+                                                            let acct_db_path = std::path::PathBuf::from(&acct_cache_dir).join("emails.db");
+                                                            if let Ok(acct_db) = crate::database::EmailDatabase::new(&acct_db_path) {
+                                                                let _ = acct_db.update_email_seen_status(&account_email, &folder, email_uid, false);
+                                                            }
+                                                            Ok(())
+                                                        }
                                                         Err(e) => Err(e.into())
                                                     }
                                                 }
