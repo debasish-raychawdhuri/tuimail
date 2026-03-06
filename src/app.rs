@@ -226,6 +226,7 @@ pub struct App {
     pub selected_search_result_idx: Option<usize>,
     pub pre_search_emails: Vec<Email>,           // emails before search, to restore
     pub pre_search_selected_idx: Option<usize>,
+    pub search_active: bool,                     // true while browsing search results
 }
 
 /// Clamp a byte position to the nearest valid UTF-8 char boundary (rounding down).
@@ -396,6 +397,7 @@ impl App {
             selected_search_result_idx: None,
             pre_search_emails: Vec::new(),
             pre_search_selected_idx: None,
+            search_active: false,
         }
     }
 
@@ -3031,8 +3033,13 @@ impl App {
     fn handle_view_mode(&mut self, key: KeyEvent) -> AppResult<()> {
         match key.code {
             KeyCode::Esc => {
-                self.mode = AppMode::Normal;
                 self.email_view_scroll = 0; // Reset scroll when exiting
+                if self.search_active {
+                    // Return to search results
+                    self.mode = AppMode::Search;
+                } else {
+                    self.mode = AppMode::Normal;
+                }
                 Ok(())
             }
             KeyCode::Up => {
@@ -3212,17 +3219,21 @@ impl App {
                 // Cancel search, restore original email list
                 self.emails = self.pre_search_emails.drain(..).collect();
                 self.selected_email_idx = self.pre_search_selected_idx;
+                self.search_active = false;
                 self.mode = AppMode::Normal;
                 Ok(())
             }
             KeyCode::Enter => {
-                // Accept search results and go to normal mode
-                if !self.search_results.is_empty() {
-                    self.emails = self.search_results.clone();
-                    self.selected_email_idx = if self.emails.is_empty() { None } else { Some(0) };
+                // Open selected search result for viewing
+                if let Some(idx) = self.selected_search_result_idx {
+                    if idx < self.search_results.len() {
+                        // Put search results into the email list so ViewEmail can display them
+                        self.emails = self.search_results.clone();
+                        self.selected_email_idx = Some(idx);
+                        self.search_active = true;
+                        self.mode = AppMode::ViewEmail;
+                    }
                 }
-                self.pre_search_emails.clear();
-                self.mode = AppMode::Normal;
                 Ok(())
             }
             KeyCode::Char(c) => {
