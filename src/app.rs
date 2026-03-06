@@ -117,7 +117,7 @@ pub enum FolderItem {
 pub struct AccountData {
     pub account: EmailAccount,  // Add reference to the account
     pub folders: Vec<String>,
-    pub emails: Vec<Email>,
+    pub emails: Vec<crate::email::EmailSummary>,
     pub selected_folder_idx: usize,
     pub email_client: Option<EmailClient>,
 }
@@ -150,8 +150,9 @@ pub struct App {
     pub selected_folder: String,  // Add current selected folder
 
     // Current view state (for the selected account/folder)
-    pub emails: Vec<Email>,
+    pub emails: Vec<crate::email::EmailSummary>,
     pub selected_email_idx: Option<usize>,
+    pub viewed_email: Option<Email>,  // Full email loaded on demand for viewing
 
     pub compose_email: Email,
     pub error_message: Option<String>,
@@ -222,9 +223,9 @@ pub struct App {
     // Search state
     pub search_query: String,
     pub search_cursor_pos: usize,
-    pub search_results: Vec<Email>,
+    pub search_results: Vec<crate::email::EmailSummary>,
     pub selected_search_result_idx: Option<usize>,
-    pub pre_search_emails: Vec<Email>,           // emails before search, to restore
+    pub pre_search_emails: Vec<crate::email::EmailSummary>,  // emails before search, to restore
     pub pre_search_selected_idx: Option<usize>,
     pub search_active: bool,                     // true while browsing search results
 }
@@ -327,6 +328,7 @@ impl App {
             // Current view state
             emails: Vec::new(),
             selected_email_idx: None,
+            viewed_email: None,
 
             compose_email: Email::new(),
             error_message: None,
@@ -1369,6 +1371,30 @@ impl App {
         }
     }
 
+    /// Load full email from database by summary. Returns the full Email for viewing/replying.
+    pub fn load_full_email(&self, summary: &crate::email::EmailSummary) -> Option<Email> {
+        let uid: u32 = summary.id.parse().ok()?;
+        let account_email = self.accounts.get(&self.current_account_idx)?.account.email.clone();
+
+        // Try per-account database first
+        let acct_cache_dir = format!(
+            "{}/.cache/tuimail/{}",
+            dirs::home_dir().unwrap_or_default().display(),
+            account_email.replace('@', "_at_").replace('.', "_")
+        );
+        let acct_db_path = std::path::PathBuf::from(&acct_cache_dir).join("emails.db");
+
+        if let Ok(acct_db) = crate::database::EmailDatabase::new(&acct_db_path) {
+            if let Ok(email) = acct_db.get_email_full(&account_email, &summary.folder, uid) {
+                return Some(email);
+            }
+        }
+
+        // Fallback to main database
+        self.database.get_email_full(&account_email, &summary.folder, uid).ok()
+    }
+
+
     /// Load emails for a specific account and folder - SYNC WITH IMAP SERVER
     pub fn load_emails_for_account_folder(
         &mut self,
@@ -1416,23 +1442,22 @@ impl App {
                         format!("Failed to open account database: {}", e)
                     )))?;
                 
-                // Get recent emails for UI display (limit to reasonable number)
-                match account_database.get_recent_emails(&account_data.email, folder, 5000) {
-                    Ok(recent_emails) => {
+                // Get recent email summaries for UI display (no body/attachment data)
+                match account_database.get_recent_email_summaries(&account_data.email, folder, 500) {
+                    Ok(summaries) => {
                         if let Some(account_data) = self.accounts.get_mut(&account_idx) {
-                            account_data.emails = recent_emails;
+                            account_data.emails = summaries;
 
-                            // Update legacy fields for backward compatibility
                             if account_idx == self.current_account_idx {
                                 self.emails = account_data.emails.clone();
                             }
                         }
                     }
                     Err(e) => {
-                        debug_log(&format!("Failed to load recent emails from database: {}", e));
-                        // Fallback: use only the newly synced emails
+                        debug_log(&format!("Failed to load email summaries from database: {}", e));
+                        // Fallback: convert newly synced emails to summaries
                         if let Some(account_data) = self.accounts.get_mut(&account_idx) {
-                            account_data.emails = new_emails;
+                            account_data.emails = new_emails.iter().map(crate::email::EmailSummary::from_email).collect();
                             if account_idx == self.current_account_idx {
                                 self.emails = account_data.emails.clone();
                             }
@@ -1461,19 +1486,18 @@ impl App {
                         format!("Failed to open account database: {}", e)
                     )))?;
                 
-                match account_database.get_all_emails(&account_data.email, folder) {
-                    Ok(db_emails) => {
+                match account_database.get_recent_email_summaries(&account_data.email, folder, 500) {
+                    Ok(summaries) => {
                         debug_log(&format!(
-                            "Fallback: Loaded {} emails from database for {}/{}",
-                            db_emails.len(),
+                            "Fallback: Loaded {} email summaries from database for {}/{}",
+                            summaries.len(),
                             account_data.email,
                             folder
                         ));
-                        
-                        if let Some(account_data) = self.accounts.get_mut(&account_idx) {
-                            account_data.emails = db_emails;
 
-                            // Update legacy fields for backward compatibility
+                        if let Some(account_data) = self.accounts.get_mut(&account_idx) {
+                            account_data.emails = summaries;
+
                             if account_idx == self.current_account_idx {
                                 self.emails = account_data.emails.clone();
                             }
@@ -1634,6 +1658,11 @@ impl App {
     /// Get the per-account database for the current account
     fn get_account_database(&self) -> Option<crate::database::EmailDatabase> {
         let account_email = &self.config.accounts.get(self.current_account_idx)?.email;
+        Self::get_account_database_for(account_email)
+    }
+
+    /// Get the per-account database for a specific account email
+    fn get_account_database_for(account_email: &str) -> Option<crate::database::EmailDatabase> {
         let cache_dir = format!("{}/.cache/tuimail/{}",
             dirs::home_dir().unwrap_or_default().display(),
             account_email.replace('@', "_at_").replace('.', "_"));
@@ -1916,24 +1945,7 @@ impl App {
                                         }
                                     }
                                     "delete" => {
-                                        let temp_email = crate::email::Email {
-                                            id: email_uid.to_string(),
-                                            folder: folder.clone(),
-                                            subject: String::new(),
-                                            from: Vec::new(),
-                                            to: Vec::new(),
-                                            cc: Vec::new(),
-                                            bcc: Vec::new(),
-                                            date: chrono::Local::now(),
-                                            body_text: None,
-                                            body_html: None,
-                                            seen: false,
-                                            attachments: Vec::new(),
-                                            flags: Vec::new(),
-                                            headers: std::collections::HashMap::new(),
-                                        };
-                                        
-                                        match client.delete_email(&temp_email) {
+                                        match client.delete_email(&email_uid.to_string(), &folder) {
                                             Ok(_) => {
                                                 database.delete_email(&account_email, &folder, email_uid)
                                             }
@@ -2096,24 +2108,7 @@ impl App {
                                                     }
                                                 }
                                                 "delete" => {
-                                                    let temp_email = crate::email::Email {
-                                                        id: email_uid.to_string(),
-                                                        folder: folder.clone(),
-                                                        subject: String::new(),
-                                                        from: Vec::new(),
-                                                        to: Vec::new(),
-                                                        cc: Vec::new(),
-                                                        bcc: Vec::new(),
-                                                        date: chrono::Local::now(),
-                                                        body_text: None,
-                                                        body_html: None,
-                                                        seen: false,
-                                                        attachments: Vec::new(),
-                                                        flags: Vec::new(),
-                                                        headers: std::collections::HashMap::new(),
-                                                    };
-                                                    
-                                                    match client.delete_email(&temp_email) {
+                                                    match client.delete_email(&email_uid.to_string(), &folder) {
                                                         Ok(_) => database.delete_email(&account_email, &folder, email_uid),
                                                         Err(e) => Err(e.into())
                                                     }
@@ -2218,13 +2213,15 @@ impl App {
         };
 
         if ui_is_empty {
-            // UI is empty, load recent emails from database
+            // UI is empty, load recent emails from per-account database
             debug_log(&format!("UI is empty, loading recent emails from database for {}/{}", account_email, folder_path));
-            match self.database.get_recent_emails(&account_email, &folder_path, 5000) {
-                Ok(existing_emails) => {
-                    debug_log(&format!("Loaded {} existing emails for empty UI", existing_emails.len()));
+            let acct_db = Self::get_account_database_for(&account_email);
+            let db_ref = acct_db.as_ref().map(|d| d as &crate::database::EmailDatabase).unwrap_or(&self.database);
+            match db_ref.get_recent_email_summaries(&account_email, &folder_path, 500) {
+                Ok(summaries) => {
+                    debug_log(&format!("Loaded {} email summaries for empty UI", summaries.len()));
                     if let Some(account_data) = self.accounts.get_mut(&account_idx) {
-                        account_data.emails = existing_emails;
+                        account_data.emails = summaries;
                         if account_idx == self.current_account_idx {
                             self.emails = account_data.emails.clone();
                             debug_log(&format!("Updated UI emails: {} emails now visible", self.emails.len()));
@@ -2249,32 +2246,26 @@ impl App {
             account_email, folder_path
         ));
 
-        // Get emails that arrived after our UI timestamp
-        match self.database.get_emails_since_timestamp(&account_email, &folder_path, ui_timestamp) {
-            Ok(new_emails) if !new_emails.is_empty() => {
-                debug_log(&format!(
-                    "Found {} new emails for {}/{} since {}",
-                    new_emails.len(), account_email, folder_path, ui_timestamp
-                ));
-                
-                // Merge new emails with existing ones
+        // Reload summaries from per-account database (uses EXISTS subquery for has_attachments)
+        let acct_db2 = Self::get_account_database_for(&account_email);
+        let db_ref2 = acct_db2.as_ref().map(|d| d as &crate::database::EmailDatabase).unwrap_or(&self.database);
+        match db_ref2.get_recent_email_summaries(&account_email, &folder_path, 500) {
+            Ok(summaries) if !summaries.is_empty() => {
+                let old_count = if let Some(ad) = self.accounts.get(&account_idx) { ad.emails.len() } else { 0 };
+                if summaries.len() != old_count {
+                    debug_log(&format!(
+                        "Refreshed summaries for {}/{}: {} -> {} emails",
+                        account_email, folder_path, old_count, summaries.len()
+                    ));
+                }
+
                 if let Some(account_data) = self.accounts.get_mut(&account_idx) {
-                    // Add new emails to the beginning (most recent first)
-                    let mut updated_emails = new_emails;
-                    updated_emails.extend(account_data.emails.clone());
-                    
-                    // Remove duplicates based on ID
-                    updated_emails.sort_by(|a, b| b.date.cmp(&a.date)); // Sort by date descending
-                    updated_emails.dedup_by(|a, b| a.id == b.id);
-                    
-                    account_data.emails = updated_emails;
-                    
-                    // Update UI emails if this is the current account
+                    account_data.emails = summaries;
+
                     if account_idx == self.current_account_idx {
                         self.emails = account_data.emails.clone();
                     }
-                    
-                    // Update UI timestamp to the latest email timestamp
+
                     if let Some(latest_email) = account_data.emails.first() {
                         let email_time = latest_email.date.with_timezone(&chrono::Utc);
                         self.ui_timestamps.insert(ui_key, email_time);
@@ -2503,14 +2494,15 @@ impl App {
                 if let Some(idx) = self.selected_email_idx {
                     debug_log(&format!("Enter pressed: idx={}, self.emails.len()={}", idx, self.emails.len()));
                     if idx < self.emails.len() {
+                        // Load full email content from database
+                        let summary = self.emails[idx].clone();
+                        self.viewed_email = self.load_full_email(&summary);
                         self.mode = AppMode::ViewEmail;
 
                         // Mark as read
                         if let Err(e) = self.ensure_account_initialized(self.current_account_idx) {
                             self.show_error(&format!("Failed to initialize account: {}", e));
-                        } else if let Some(account_data) =
-                            self.accounts.get(&self.current_account_idx)
-                        {
+                        } else {
                             let email = &self.emails[idx];
                             debug_log(&format!("Opening email: subject={}", email.subject));
                             if !email.seen {
@@ -3230,6 +3222,8 @@ impl App {
                         // Put search results into the email list so ViewEmail can display them
                         self.emails = self.search_results.clone();
                         self.selected_email_idx = Some(idx);
+                        let summary = self.search_results[idx].clone();
+                        self.viewed_email = self.load_full_email(&summary);
                         self.search_active = true;
                         self.mode = AppMode::ViewEmail;
                     }
@@ -3316,7 +3310,7 @@ impl App {
         if let Some(account_db) = self.get_account_database() {
             match account_db.search_emails(&account_email, &self.search_query, 100) {
                 Ok(results) => {
-                    self.search_results = results;
+                    self.search_results = results.iter().map(crate::email::EmailSummary::from_email).collect();
                     self.selected_search_result_idx = if self.search_results.is_empty() {
                         None
                     } else {
@@ -3345,8 +3339,6 @@ impl App {
                         a.address.to_lowercase().contains(&query_lower)
                             || a.name.as_deref().unwrap_or("").to_lowercase().contains(&query_lower)
                     })
-                    || email.to.iter().any(|a| a.address.to_lowercase().contains(&query_lower))
-                    || email.body_text.as_deref().unwrap_or("").to_lowercase().contains(&query_lower)
             })
             .cloned()
             .collect();
@@ -3398,13 +3390,23 @@ impl App {
     }
 
     pub fn reply_to_email(&mut self) -> AppResult<()> {
-        if let Some(idx) = self.selected_email_idx {
-            if idx >= self.emails.len() {
-                self.show_error("Invalid email selection");
-                return Ok(());
+        if self.selected_email_idx.is_some() {
+            // Load full email if not already loaded
+            if self.viewed_email.is_none() {
+                if let Some(idx) = self.selected_email_idx {
+                    if idx < self.emails.len() {
+                        let summary = self.emails[idx].clone();
+                        self.viewed_email = self.load_full_email(&summary);
+                    }
+                }
             }
-
-            let original = &self.emails[idx];
+            let original = match &self.viewed_email {
+                Some(e) => e,
+                None => {
+                    self.show_error("Could not load email for reply");
+                    return Ok(());
+                }
+            };
 
             let mut reply = Email::new();
 
@@ -3526,7 +3528,18 @@ impl App {
                 return Ok(());
             }
 
-            let original = &self.emails[idx];
+            // Ensure viewed_email is loaded
+            if self.viewed_email.is_none() {
+                let summary = self.emails[idx].clone();
+                self.viewed_email = self.load_full_email(&summary);
+            }
+            let original = match &self.viewed_email {
+                Some(e) => e,
+                None => {
+                    self.show_error("Could not load email for reply-all");
+                    return Ok(());
+                }
+            };
             let current_account = &self.config.accounts[self.current_account_idx];
 
             let mut reply = Email::new();
@@ -3665,7 +3678,18 @@ impl App {
                 return Ok(());
             }
 
-            let original = &self.emails[idx];
+            // Ensure viewed_email is loaded
+            if self.viewed_email.is_none() {
+                let summary = self.emails[idx].clone();
+                self.viewed_email = self.load_full_email(&summary);
+            }
+            let original = match &self.viewed_email {
+                Some(e) => e,
+                None => {
+                    self.show_error("Could not load email for forwarding");
+                    return Ok(());
+                }
+            };
 
             let mut forward = Email::new();
 
@@ -4116,30 +4140,24 @@ impl App {
 
     /// Select next attachment in the current email
     pub fn select_next_attachment(&mut self) {
-        if let Some(email_idx) = self.selected_email_idx {
-            if email_idx < self.emails.len() {
-                let email = &self.emails[email_idx];
-                if !email.attachments.is_empty() {
-                    let current = self.selected_attachment_idx.unwrap_or(0);
-                    self.selected_attachment_idx = Some((current + 1) % email.attachments.len());
-                }
+        if let Some(email) = &self.viewed_email {
+            if !email.attachments.is_empty() {
+                let current = self.selected_attachment_idx.unwrap_or(0);
+                self.selected_attachment_idx = Some((current + 1) % email.attachments.len());
             }
         }
     }
 
     /// Select previous attachment in the current email
     pub fn select_previous_attachment(&mut self) {
-        if let Some(email_idx) = self.selected_email_idx {
-            if email_idx < self.emails.len() {
-                let email = &self.emails[email_idx];
-                if !email.attachments.is_empty() {
-                    let current = self.selected_attachment_idx.unwrap_or(0);
-                    self.selected_attachment_idx = Some(if current == 0 {
-                        email.attachments.len().saturating_sub(1)
-                    } else {
-                        current.saturating_sub(1)
-                    });
-                }
+        if let Some(email) = &self.viewed_email {
+            if !email.attachments.is_empty() {
+                let current = self.selected_attachment_idx.unwrap_or(0);
+                self.selected_attachment_idx = Some(if current == 0 {
+                    email.attachments.len().saturating_sub(1)
+                } else {
+                    current.saturating_sub(1)
+                });
             }
         }
     }
@@ -4162,15 +4180,7 @@ impl App {
         Ok(())
     }
     fn get_current_email(&self) -> Option<&Email> {
-        if let Some(email_idx) = self.selected_email_idx {
-            if email_idx < self.emails.len() {
-                Some(&self.emails[email_idx])
-            } else {
-                None
-            }
-        } else {
-            None
-        }
+        self.viewed_email.as_ref()
     }
 
     /// Save attachment with file browser
@@ -4444,33 +4454,46 @@ impl App {
     pub fn check_for_new_emails(&mut self) {
         // Get current account and folder
         if let Some(account_data) = self.accounts.get(&self.current_account_idx) {
-            let account_email = &account_data.account.email;
-            let folder = &self.selected_folder;
-            
-            // Load emails from database
-            match self.database.load_emails(account_email, folder) {
-                Ok(db_emails) => {
+            let account_email = account_data.account.email.clone();
+            let folder = self.selected_folder.clone();
+
+            // Use the per-account database (where emails are actually stored)
+            let acct_cache_dir = format!("{}/.cache/tuimail/{}",
+                dirs::home_dir().unwrap_or_default().display(),
+                account_email.replace('@', "_at_").replace('.', "_"));
+            let acct_db_path = std::path::PathBuf::from(&acct_cache_dir).join("emails.db");
+            let db = match crate::database::EmailDatabase::new(&acct_db_path) {
+                Ok(db) => db,
+                Err(e) => {
+                    debug_log(&format!("Failed to open account database for polling: {}", e));
+                    return;
+                }
+            };
+
+            // Load email summaries from per-account database
+            match db.get_recent_email_summaries(&account_email, &folder, 500) {
+                Ok(db_summaries) => {
                     // Check if we have new emails compared to what's currently in UI
-                    let current_email_ids: std::collections::HashSet<String> = 
+                    let current_email_ids: std::collections::HashSet<String> =
                         self.emails.iter().map(|e| e.id.clone()).collect();
-                    
-                    let new_emails: Vec<crate::email::Email> = db_emails
+
+                    let new_summaries: Vec<crate::email::EmailSummary> = db_summaries
                         .iter()
                         .filter(|email| !current_email_ids.contains(&email.id))
                         .cloned()
                         .collect();
-                    
-                    if !new_emails.is_empty() {
+
+                    if !new_summaries.is_empty() {
                         debug_log(&format!(
                             "Found {} new emails in database",
-                            new_emails.len()
+                            new_summaries.len()
                         ));
 
-                        let new_count = new_emails.len();
+                        let new_count = new_summaries.len();
 
                         // Merge new emails with existing ones
                         let mut all_emails = self.emails.clone();
-                        all_emails.extend(new_emails);
+                        all_emails.extend(new_summaries);
 
                         // Remove duplicates based on email ID (UID)
                         let mut seen_ids = std::collections::HashSet::new();
@@ -4517,14 +4540,14 @@ impl App {
                         self.show_info(&format!("Found {} new emails", new_count));
                     } else {
                         // Update emails from database even if no new ones (in case of changes)
-                        if db_emails.len() != self.emails.len() {
+                        if db_summaries.len() != self.emails.len() {
                             debug_log(&format!(
                                 "Email count changed: {} in DB vs {} in UI, updating",
-                                db_emails.len(),
+                                db_summaries.len(),
                                 self.emails.len()
                             ));
-                            self.emails = db_emails;
-                            
+                            self.emails = db_summaries;
+
                             // Update the account's cached emails
                             if let Some(account_data) = self.accounts.get_mut(&self.current_account_idx)
                             {
@@ -4547,8 +4570,8 @@ impl App {
                 return Ok(());
             }
 
-            // Clone the email to avoid borrowing issues
-            let email = self.emails[idx].clone();
+            // Clone the summary to avoid borrowing issues
+            let summary = self.emails[idx].clone();
 
             // Ensure the current account is initialized
             self.ensure_account_initialized(self.current_account_idx)?;
@@ -4556,7 +4579,7 @@ impl App {
             // Get the current account's email client
             if let Some(account_data) = self.accounts.get(&self.current_account_idx) {
                 if let Some(client) = &account_data.email_client {
-                    match client.delete_email(&email) {
+                    match client.delete_email(&summary.id, &summary.folder) {
                         Ok(_) => {
                             self.emails.remove(idx);
 

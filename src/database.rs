@@ -1,4 +1,4 @@
-use crate::email::{Email, EmailAttachment, EmailAddress, debug_log};
+use crate::email::{Email, EmailAttachment, EmailAddress, EmailSummary, debug_log};
 use anyhow::{Result, Context};
 use chrono::{DateTime, Local, TimeZone, Utc};
 use rusqlite::{Connection, params};
@@ -947,6 +947,115 @@ impl EmailDatabase {
         }
 
         Ok(emails)
+    }
+
+    /// Load lightweight email summaries for list display (no body, no attachment data)
+    pub fn get_recent_email_summaries(&self, account_email: &str, folder: &str, limit: usize) -> Result<Vec<EmailSummary>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT e.uid, e.subject, e.from_addresses, e.date_received, e.seen,
+                    EXISTS(SELECT 1 FROM attachments a WHERE a.account_email = e.account_email AND a.folder = e.folder AND a.email_uid = e.uid) as has_attachments
+             FROM emails e
+             WHERE e.account_email = ?1 AND e.folder = ?2
+             ORDER BY e.date_received DESC
+             LIMIT ?3",
+        )?;
+
+        let rows = stmt.query_map(params![account_email, folder, limit], |row| {
+            Ok((
+                row.get::<_, u32>(0)?,       // uid
+                row.get::<_, String>(1)?,    // subject
+                row.get::<_, String>(2)?,    // from_addresses
+                row.get::<_, i64>(3)?,       // date_received
+                row.get::<_, bool>(4)?,      // seen
+                row.get::<_, bool>(5)?,      // has_attachments
+            ))
+        })?;
+
+        let mut summaries = Vec::new();
+        for row_result in rows {
+            let (uid, subject, from_str, date_received, seen, has_attachments) = row_result?;
+            let from: Vec<EmailAddress> = serde_json::from_str(&from_str).unwrap_or_default();
+
+            summaries.push(EmailSummary {
+                id: uid.to_string(),
+                subject,
+                from,
+                date: chrono::DateTime::from_timestamp(date_received, 0)
+                    .unwrap_or_else(|| chrono::DateTime::from_timestamp(0, 0).unwrap())
+                    .with_timezone(&Local),
+                seen,
+                folder: folder.to_string(),
+                has_attachments,
+            });
+        }
+
+        Ok(summaries)
+    }
+
+    /// Load a full email by UID (body + attachments with data) for viewing
+    pub fn get_email_full(&self, account_email: &str, folder: &str, uid: u32) -> Result<Email> {
+        let row = self.conn.query_row(
+            "SELECT uid, subject, from_addresses, to_addresses,
+                    cc_addresses, bcc_addresses, date_received, body_text, body_html,
+                    flags, headers, seen
+             FROM emails
+             WHERE account_email = ?1 AND folder = ?2 AND uid = ?3",
+            params![account_email, folder, uid],
+            |row| {
+                Ok((
+                    row.get::<_, u32>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, Option<String>>(7)?,
+                    row.get::<_, Option<String>>(8)?,
+                    row.get::<_, String>(9)?,
+                    row.get::<_, String>(10)?,
+                    row.get::<_, bool>(11)?,
+                ))
+            },
+        )?;
+
+        let (uid, subject, from_str, to_str, cc_str, bcc_str, date_received,
+             body_text, body_html, flags_str, headers_str, seen) = row;
+
+        let mut attachment_stmt = self.conn.prepare(
+            "SELECT filename, content_type, data FROM attachments
+             WHERE account_email = ?1 AND folder = ?2 AND email_uid = ?3"
+        )?;
+        let attachment_rows = attachment_stmt.query_map(params![account_email, folder, uid], |row| {
+            Ok(EmailAttachment {
+                filename: row.get(0)?,
+                content_type: row.get(1)?,
+                data: row.get(2)?,
+            })
+        })?;
+        let mut attachments = Vec::new();
+        for a in attachment_rows {
+            attachments.push(a?);
+        }
+
+        Ok(Email {
+            id: uid.to_string(),
+            subject,
+            from: serde_json::from_str(&from_str).unwrap_or_default(),
+            to: serde_json::from_str(&to_str).unwrap_or_default(),
+            cc: serde_json::from_str(&cc_str).unwrap_or_default(),
+            bcc: serde_json::from_str(&bcc_str).unwrap_or_default(),
+            date: chrono::DateTime::from_timestamp(date_received, 0)
+                .unwrap_or_else(|| chrono::DateTime::from_timestamp(0, 0).unwrap())
+                .with_timezone(&Local),
+            body_text,
+            body_html,
+            attachments,
+            flags: serde_json::from_str(&flags_str).unwrap_or_default(),
+            headers: serde_json::from_str(&headers_str).unwrap_or_default(),
+            seen,
+            folder: folder.to_string(),
+        })
     }
 
     pub fn update_email_seen_status(&self, account_email: &str, folder: &str, uid: u32, seen: bool) -> Result<()> {

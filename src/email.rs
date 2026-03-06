@@ -205,6 +205,32 @@ pub struct Email {
     pub folder: String,
 }
 
+/// Lightweight email metadata for list display. Never used for saving to database.
+#[derive(Debug, Clone)]
+pub struct EmailSummary {
+    pub id: String,
+    pub subject: String,
+    pub from: Vec<EmailAddress>,
+    pub date: DateTime<Local>,
+    pub seen: bool,
+    pub folder: String,
+    pub has_attachments: bool,
+}
+
+impl EmailSummary {
+    pub fn from_email(email: &Email) -> Self {
+        Self {
+            id: email.id.clone(),
+            subject: email.subject.clone(),
+            from: email.from.clone(),
+            date: email.date,
+            seen: email.seen,
+            folder: email.folder.clone(),
+            has_attachments: !email.attachments.is_empty(),
+        }
+    }
+}
+
 // Custom serialization for DateTime<Local>
 mod local_datetime_serde {
     use chrono::{DateTime, Local, TimeZone};
@@ -1880,44 +1906,44 @@ impl EmailClient {
         }
     }
     
-    pub fn delete_email(&self, email: &Email) -> Result<(), EmailError> {
+    pub fn delete_email(&self, email_id: &str, folder: &str) -> Result<(), EmailError> {
         // Validate email ID before attempting STORE operation
-        if email.id.is_empty() || email.id == "0" {
-            debug_log(&format!("Invalid email ID '{}', skipping delete", email.id));
+        if email_id.is_empty() || email_id == "0" {
+            debug_log(&format!("Invalid email ID '{}', skipping delete", email_id));
             return Err(EmailError::ImapError("Invalid email ID for STORE operation".to_string()));
         }
-        
+
         match self.account.imap_security {
             ImapSecurity::SSL | ImapSecurity::StartTLS => {
                 let mut session = self.connect_imap_with_security()?;
                 session
-                    .select(&email.folder)
+                    .select(folder)
                     .map_err(|e| EmailError::ImapError(e.to_string()))?;
-                
+
                 session
-                    .uid_store(&email.id, "+FLAGS (\\Deleted)")
+                    .uid_store(email_id, "+FLAGS (\\Deleted)")
                     .map_err(|e| EmailError::ImapError(e.to_string()))?;
-                
+
                 session
                     .expunge()
                     .map_err(|e| EmailError::ImapError(e.to_string()))?;
-                
+
                 Ok(())
             }
             ImapSecurity::None => {
                 let mut session = self.connect_imap_plain()?;
                 session
-                    .select(&email.folder)
+                    .select(folder)
                     .map_err(|e| EmailError::ImapError(e.to_string()))?;
-                
+
                 session
-                    .uid_store(&email.id, "+FLAGS (\\Deleted)")
+                    .uid_store(email_id, "+FLAGS (\\Deleted)")
                     .map_err(|e| EmailError::ImapError(e.to_string()))?;
-                
+
                 session
                     .expunge()
                     .map_err(|e| EmailError::ImapError(e.to_string()))?;
-                
+
                 Ok(())
             }
         }

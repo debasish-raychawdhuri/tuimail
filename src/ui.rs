@@ -155,7 +155,7 @@ fn render_email_list(f: &mut Frame, app: &App, area: Rect) {
                 }
             });
             
-            let attachment_indicator = if !email.attachments.is_empty() {
+            let attachment_indicator = if email.has_attachments {
                 "📎 "
             } else {
                 "   " // Three spaces to match the width of "📎 " (emoji takes 2 chars + 1 space)
@@ -193,37 +193,33 @@ fn render_email_list(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_view_email_mode(f: &mut Frame, app: &App, area: Rect) {
-    if let Some(idx) = app.selected_email_idx {
-        if idx < app.emails.len() {
-            let email = &app.emails[idx];
-            
-            // Determine layout based on whether there are attachments
-            let constraints = if email.attachments.is_empty() {
-                vec![
-                    Constraint::Length(6), // Header
-                    Constraint::Min(0),    // Body
-                ]
-            } else {
-                vec![
-                    Constraint::Length(6), // Header
-                    Constraint::Length(4 + email.attachments.len().min(5) as u16), // Attachments (max 5 visible)
-                    Constraint::Min(0),    // Body
-                ]
-            };
-            
-            let chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints(constraints)
-                .split(area);
-            
-            render_email_header(f, email, chunks[0]);
-            
-            if !email.attachments.is_empty() {
-                render_email_attachments(f, app, email, chunks[1]);
-                render_scrollable_email_body(f, email, chunks[2], app.email_view_scroll);
-            } else {
-                render_scrollable_email_body(f, email, chunks[1], app.email_view_scroll);
-            }
+    if let Some(email) = &app.viewed_email {
+        // Determine layout based on whether there are attachments
+        let constraints = if email.attachments.is_empty() {
+            vec![
+                Constraint::Length(6), // Header
+                Constraint::Min(0),    // Body
+            ]
+        } else {
+            vec![
+                Constraint::Length(6), // Header
+                Constraint::Length(4 + email.attachments.len().min(5) as u16), // Attachments (max 5 visible)
+                Constraint::Min(0),    // Body
+            ]
+        };
+
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints(constraints)
+            .split(area);
+
+        render_email_header(f, email, chunks[0]);
+
+        if !email.attachments.is_empty() {
+            render_email_attachments(f, app, email, chunks[1]);
+            render_scrollable_email_body(f, email, chunks[2], app.email_view_scroll);
+        } else {
+            render_scrollable_email_body(f, email, chunks[1], app.email_view_scroll);
         }
     }
 }
