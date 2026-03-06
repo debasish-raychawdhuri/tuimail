@@ -53,6 +53,9 @@ fn render_title_bar(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_main_content(f: &mut Frame, app: &App, area: Rect) {
+    // Clear the entire content area to prevent leftover artifacts from previous mode
+    f.render_widget(Block::default(), area);
+
     // If in file browser mode, show the file browser regardless of current mode
     if app.file_browser_mode {
         render_file_browser(f, app, area);
