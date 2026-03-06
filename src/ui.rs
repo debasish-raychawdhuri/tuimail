@@ -281,13 +281,21 @@ fn format_file_size(bytes: usize) -> String {
 }
 
 fn render_scrollable_email_body(f: &mut Frame, email: &Email, area: Rect, scroll_offset: usize) {
-    let raw_content = email.body_text.as_deref().unwrap_or("No content");
-    let content = expand_tabs_and_normalize(raw_content);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("Body (↑/↓ to scroll, PgUp/PgDn for fast scroll)");
+    let inner_width = block.inner(area).width as usize;
+
+    let content = if let Some(ref html) = email.body_html {
+        // Render HTML to text at the actual terminal width
+        html2text::from_read(html.as_bytes(), inner_width)
+    } else {
+        let raw = email.body_text.as_deref().unwrap_or("No content");
+        expand_tabs_and_normalize(raw)
+    };
 
     let body = Paragraph::new(content.as_str())
-        .block(Block::default()
-            .borders(Borders::ALL)
-            .title("Body (↑/↓ to scroll, PgUp/PgDn for fast scroll)"))
+        .block(block)
         .wrap(Wrap { trim: false })
         .scroll((scroll_offset as u16, 0));
 

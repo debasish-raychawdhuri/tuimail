@@ -40,6 +40,9 @@ shellexpand = "3.1"
 # Secure password storage
 keyring = "2.3"
 
+# HTML to text rendering
+html2text = "0.12"
+
 # Grammar checking
 nlprule = "0.6.4"
 
