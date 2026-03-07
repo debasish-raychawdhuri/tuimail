@@ -296,6 +296,7 @@ impl EmailDatabase {
                 Ok(EmailAttachment {
                     filename: row.get(0)?,
                     content_type: row.get(1)?,
+                    content_id: None,
                     data: row.get(2)?,
                 })
             })?;
@@ -589,6 +590,7 @@ impl EmailDatabase {
             Ok(EmailAttachment {
                 filename: row.get(0)?,
                 content_type: row.get(1)?,
+                content_id: None,
                 data: row.get(2)?,
             })
         })?;
@@ -829,6 +831,7 @@ mod tests {
         email.attachments.push(EmailAttachment {
             filename: "test.txt".to_string(),
             content_type: "text/plain".to_string(),
+            content_id: None,
             data: b"hello world".to_vec(),
         });
         db.save_email(&email, "user@test.com").unwrap();

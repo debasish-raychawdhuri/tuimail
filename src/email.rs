@@ -182,6 +182,7 @@ impl From<EmailAddress> for Mailbox {
 pub struct EmailAttachment {
     pub filename: String,
     pub content_type: String,
+    pub content_id: Option<String>,
     #[serde(with = "serde_bytes")]
     pub data: Vec<u8>,
 }
@@ -272,6 +273,13 @@ impl Email {
         }
     }
     
+    /// Build a map of Content-ID → attachment data for cid: image references in HTML.
+    pub fn cid_attachments_map(&self) -> HashMap<String, Vec<u8>> {
+        self.attachments.iter()
+            .filter_map(|att| att.content_id.as_ref().map(|cid| (cid.clone(), att.data.clone())))
+            .collect()
+    }
+
     /// Get Reply-To addresses from headers
     pub fn reply_to(&self) -> Vec<EmailAddress> {
         if let Some(reply_to_str) = self.headers.get("Reply-To") {
@@ -526,6 +534,7 @@ impl Email {
         let mut filename = None;
         let mut content_type = "application/octet-stream".to_string();
         let mut is_attachment = false;
+        let mut content_id: Option<String> = None;
         
         // Look through headers to find content-disposition and content-type
         debug_log(&format!("Processing {} headers for attachment detection", part.headers.len()));
@@ -581,10 +590,21 @@ impl Email {
                     }
                 }
                 _ => {
+                    // Extract Content-ID from any header value type
+                    if header_name_str.contains("contentid") || header_name_str.contains("content-id") {
+                        if let Some(val) = header_value_str {
+                            let cid = val.trim().trim_start_matches('<').trim_end_matches('>').to_string();
+                            if !cid.is_empty() {
+                                debug_log(&format!("Found Content-ID: {}", cid));
+                                content_id = Some(cid);
+                            }
+                        }
+                    }
+
                     // Handle text-based headers
                     if let Some(header_value) = header_value_str {
                         debug_log(&format!("Checking header: {} = {}", header_name_str, header_value));
-                        
+
                         if header_name_str.contains("contentdisposition") || header_name_str.contains("content-disposition") {
                             debug_log("Found content-disposition header");
                             // Simple parsing for filename parameter
@@ -668,10 +688,12 @@ impl Email {
         
         // If we have a filename or it's marked as attachment, try to extract it
         // Be conservative: require explicit attachment markers or non-text content
-        let is_likely_attachment = is_attachment || 
-            (filename.is_some() && !content_type.starts_with("text/plain")) || 
-            (!content_type.starts_with("text/") && 
-             !content_type.starts_with("multipart/") && 
+        // Also capture inline images with Content-ID (for cid: references in HTML)
+        let is_likely_attachment = is_attachment ||
+            content_id.is_some() ||
+            (filename.is_some() && !content_type.starts_with("text/plain")) ||
+            (!content_type.starts_with("text/") &&
+             !content_type.starts_with("multipart/") &&
              content_type != "application/octet-stream");
         
         if is_likely_attachment {
@@ -740,6 +762,7 @@ impl Email {
                 return Some(EmailAttachment {
                     filename: final_filename,
                     content_type,
+                    content_id,
                     data,
                 });
             } else {
@@ -2313,6 +2336,7 @@ mod tests {
         let att = EmailAttachment {
             filename: "test.txt".to_string(),
             content_type: "text/plain".to_string(),
+            content_id: None,
             data: vec![72, 101, 108, 108, 111],
         };
         let json = serde_json::to_string(&att).unwrap();

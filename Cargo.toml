@@ -9,8 +9,8 @@ path = "src/main.rs"
 
 [dependencies]
 # Terminal UI
-crossterm = "0.27"
-ratatui = "0.24"
+crossterm = "0.29"
+ratatui = "0.30"
 
 # Email protocols
 imap = "2.4"
@@ -40,8 +40,10 @@ shellexpand = "3.1"
 # Secure password storage
 keyring = "2.3"
 
-# HTML to text rendering
-html2text = "0.12"
+# HTML rendering
+tui_html = { path = "/home/debasish/rust/tui_html" }
+scraper = "0.22"
+reqwest = { version = "0.12", features = ["blocking"] }
 
 # Grammar checking
 nlprule = "0.6.4"

@@ -345,10 +345,14 @@ async fn main() -> Result<()> {
         .context("Failed to enter alternate screen")?;
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))
         .context("Failed to create terminal")?;
-    
+
+    // Query terminal graphics capabilities AFTER entering raw mode/alternate screen,
+    // matching the tui_html examples where this works correctly.
+    let html_view_state = tui_html::HtmlViewState::new();
+
     // Clear the terminal to ensure clean start
     terminal.clear().context("Failed to clear terminal")?;
-    
+
     // Create database
     let cache_dir = dirs::cache_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
@@ -359,9 +363,10 @@ async fn main() -> Result<()> {
         crate::database::EmailDatabase::new(&db_path)
             .context("Failed to initialize database")?
     );
-    
+
     // Create app state
     let mut app = App::new(config, database.clone());
+    app.html_view_state = Some(html_view_state);
 
     // Load emails for the default account's INBOX on startup
     if let Err(e) = app.load_emails_for_account_folder(app.current_account_idx, "INBOX") {
@@ -460,7 +465,7 @@ fn migrate_passwords_if_needed(config: &mut Config, config_path: &str) -> Result
     Ok(())
 }
 
-async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> AppResult<()> {
+async fn run_app<B: Backend<Error = std::io::Error>>(terminal: &mut Terminal<B>, app: &mut App) -> AppResult<()> {
     // Initialize app with error handling
     if let Err(e) = app.init() {
         // Log the error to debug file if debug is enabled
@@ -518,8 +523,21 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> AppRe
             }
         }
 
-        // Handle events — block for up to 1 second
-        if event::poll(Duration::from_secs(1))? {
+        // Poll for completed remote image fetches
+        let had_pending = app.image_fetch_pending;
+        app.poll_image_fetches();
+        // If images arrived, redraw immediately
+        if had_pending && !app.cached_remote_images.is_empty() {
+            let _ = terminal.draw(|frame| ui(frame, app));
+        }
+
+        // Handle events — use shorter timeout while fetching images
+        let poll_timeout = if app.image_fetch_pending {
+            Duration::from_millis(100)
+        } else {
+            Duration::from_secs(1)
+        };
+        if event::poll(poll_timeout)? {
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
                     // Handle input with error recovery

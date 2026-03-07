@@ -197,6 +197,13 @@ pub struct App {
     pub sync_notify_rx: Option<std::sync::mpsc::Receiver<()>>,
     pub sync_notify_tx: std::sync::mpsc::Sender<()>,
 
+    // HTML rendering state
+    pub html_view_state: Option<tui_html::HtmlViewState>,
+    pub remote_images_allowed: bool,
+    pub cached_remote_images: HashMap<String, Vec<u8>>,
+    pub image_fetch_rx: Option<std::sync::mpsc::Receiver<(String, Vec<u8>)>>,
+    pub image_fetch_pending: bool,
+
     // Address field parsing optimization
     pub address_fields_dirty: bool,
 
@@ -373,6 +380,13 @@ impl App {
             // Sync notification channel (initialized below)
             sync_notify_rx: None,
             sync_notify_tx: sync_tx,
+
+            // HTML rendering state
+            html_view_state: None,
+            remote_images_allowed: false,
+            cached_remote_images: HashMap::new(),
+            image_fetch_rx: None,
+            image_fetch_pending: false,
 
             // Address field parsing optimization
             address_fields_dirty: false,
@@ -2120,6 +2134,7 @@ impl App {
                         // Load full email content from database
                         let summary = self.emails[idx].clone();
                         self.viewed_email = self.load_full_email(&summary);
+                        self.reset_image_state();
                         self.mode = AppMode::ViewEmail;
 
                         // Mark as read
@@ -2650,6 +2665,7 @@ impl App {
             KeyCode::Esc => {
                 self.email_view_scroll = 0;
                 self.show_raw_headers = false;
+                self.reset_image_state();
                 if self.search_active {
                     // Return to search results
                     self.mode = AppMode::Search;
@@ -2724,7 +2740,101 @@ impl App {
                 self.email_view_scroll = 0;
                 Ok(())
             }
+            KeyCode::Char('i') => {
+                if !self.remote_images_allowed {
+                    self.remote_images_allowed = true;
+                    self.fetch_remote_images_for_current_email();
+                } else {
+                    self.remote_images_allowed = false;
+                    self.cached_remote_images.clear();
+                    self.image_fetch_pending = false;
+                    self.image_fetch_rx = None;
+                    if let Some(ref mut state) = self.html_view_state {
+                        state.clear_cache();
+                    }
+                }
+                Ok(())
+            }
             _ => Ok(()),
+        }
+    }
+
+    fn reset_image_state(&mut self) {
+        self.remote_images_allowed = false;
+        self.cached_remote_images.clear();
+        self.image_fetch_pending = false;
+        self.image_fetch_rx = None;
+        if let Some(ref mut state) = self.html_view_state {
+            state.clear_cache();
+        }
+    }
+
+    fn fetch_remote_images_for_current_email(&mut self) {
+        let html = match self.viewed_email.as_ref().and_then(|e| e.body_html.as_ref()) {
+            Some(h) => h.clone(),
+            None => return,
+        };
+        let doc = scraper::Html::parse_document(&html);
+        let selector = scraper::Selector::parse("img[src]").unwrap();
+        let mut urls: Vec<String> = Vec::new();
+        for element in doc.select(&selector) {
+            if let Some(src) = element.value().attr("src") {
+                if (src.starts_with("http://") || src.starts_with("https://"))
+                    && !self.cached_remote_images.contains_key(src)
+                {
+                    urls.push(src.to_string());
+                }
+            }
+        }
+        if urls.is_empty() {
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.image_fetch_rx = Some(rx);
+        self.image_fetch_pending = true;
+        // Spawn a background thread so the UI stays responsive
+        thread::spawn(move || {
+            for url in urls {
+                if let Ok(response) = reqwest::blocking::get(&url) {
+                    if let Ok(bytes) = response.bytes() {
+                        let _ = tx.send((url, bytes.to_vec()));
+                    }
+                }
+            }
+            // tx drops here, signaling completion
+        });
+    }
+
+    /// Poll for completed image fetches. Call this from the event loop.
+    pub fn poll_image_fetches(&mut self) {
+        if !self.image_fetch_pending {
+            return;
+        }
+        let rx = match self.image_fetch_rx.as_ref() {
+            Some(rx) => rx,
+            None => return,
+        };
+        let mut got_any = false;
+        // Drain all available results without blocking
+        loop {
+            match rx.try_recv() {
+                Ok((url, data)) => {
+                    self.cached_remote_images.insert(url, data);
+                    got_any = true;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.image_fetch_pending = false;
+                    self.image_fetch_rx = None;
+                    break;
+                }
+            }
+        }
+        if got_any {
+            // Clear image protocol cache so re-render picks up new images
+            if let Some(ref mut state) = self.html_view_state {
+                state.clear_cache();
+            }
         }
     }
 
@@ -2861,6 +2971,7 @@ impl App {
                         self.selected_email_idx = Some(idx);
                         let summary = self.search_results[idx].clone();
                         self.viewed_email = self.load_full_email(&summary);
+                        self.reset_image_state();
                         self.search_active = true;
                         self.mode = AppMode::ViewEmail;
                     }
@@ -3922,6 +4033,7 @@ impl App {
                 let attachment = crate::email::EmailAttachment {
                     filename,
                     content_type,
+                    content_id: None,
                     data,
                 };
 

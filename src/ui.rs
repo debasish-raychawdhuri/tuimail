@@ -2,14 +2,14 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph, Tabs, Wrap},
+    widgets::{Block, Borders, List, ListItem, Paragraph, StatefulWidget, Tabs, Wrap},
     Frame,
 };
 
 use crate::app::{App, AppMode};
 use crate::email::Email;
 
-pub fn ui(f: &mut Frame, app: &App) {
+pub fn ui(f: &mut Frame, app: &mut App) {
     // Create the layout
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -18,7 +18,7 @@ pub fn ui(f: &mut Frame, app: &App) {
             Constraint::Min(0),    // Main content
             Constraint::Length(1), // Status bar
         ])
-        .split(f.size());
+        .split(f.area());
 
     render_title_bar(f, app, chunks[0]);
     render_main_content(f, app, chunks[1]);
@@ -40,7 +40,7 @@ fn render_title_bar(f: &mut Frame, app: &App, area: Rect) {
     };
     
     let titles = vec![inbox_title.as_str(), "Compose", "Settings", "Help"];
-    let tabs = Tabs::new(titles.iter().cloned().map(Line::from).collect())
+    let tabs = Tabs::new(titles.iter().cloned().map(Line::from).collect::<Vec<_>>())
         .block(Block::default().borders(Borders::BOTTOM))
         .highlight_style(Style::default().fg(Color::Black).bg(Color::White).add_modifier(Modifier::BOLD))
         .select(match app.mode {
@@ -52,7 +52,7 @@ fn render_title_bar(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(tabs, area);
 }
 
-fn render_main_content(f: &mut Frame, app: &App, area: Rect) {
+fn render_main_content(f: &mut Frame, app: &mut App, area: Rect) {
     // Clear the entire content area to prevent leftover artifacts from previous mode
     f.render_widget(Block::default(), area);
 
@@ -195,43 +195,43 @@ fn render_email_list(f: &mut Frame, app: &App, area: Rect) {
     f.render_stateful_widget(emails, area, &mut state);
 }
 
-fn render_view_email_mode(f: &mut Frame, app: &App, area: Rect) {
-    if let Some(email) = &app.viewed_email {
-        if app.show_raw_headers {
-            render_raw_headers(f, email, area, app.email_view_scroll, &app.email_view_max_scroll);
-            return;
-        }
+fn render_view_email_mode(f: &mut Frame, app: &mut App, area: Rect) {
+    let email = match app.viewed_email.clone() {
+        Some(e) => e,
+        None => return,
+    };
 
-        // Determine layout based on whether there are attachments
-        let constraints = if email.attachments.is_empty() {
-            vec![
-                Constraint::Length(6), // Header
-                Constraint::Min(0),    // Body
-            ]
-        } else {
-            vec![
-                Constraint::Length(6), // Header
-                Constraint::Length(4 + email.attachments.len().min(5) as u16), // Attachments (max 5 visible)
-                Constraint::Min(0),    // Body
-            ]
-        };
+    if app.show_raw_headers {
+        render_raw_headers(f, &email, area, app.email_view_scroll, &app.email_view_max_scroll);
+        return;
+    }
 
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints(constraints)
-            .split(area);
+    // Determine layout based on whether there are attachments
+    let constraints = if email.attachments.is_empty() {
+        vec![
+            Constraint::Length(6), // Header
+            Constraint::Min(0),    // Body
+        ]
+    } else {
+        vec![
+            Constraint::Length(6), // Header
+            Constraint::Length(4 + email.attachments.len().min(5) as u16), // Attachments (max 5 visible)
+            Constraint::Min(0),    // Body
+        ]
+    };
 
-        render_email_header(f, email, chunks[0]);
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
+        .split(area);
 
-        let scroll = app.email_view_scroll;
-        let mut max_scroll = 0;
-        if !email.attachments.is_empty() {
-            render_email_attachments(f, app, email, chunks[1]);
-            render_scrollable_email_body(f, email, chunks[2], scroll, &mut max_scroll);
-        } else {
-            render_scrollable_email_body(f, email, chunks[1], scroll, &mut max_scroll);
-        }
-        app.email_view_max_scroll.set(max_scroll);
+    render_email_header(f, &email, chunks[0]);
+
+    if !email.attachments.is_empty() {
+        render_email_attachments(f, app, &email, chunks[1]);
+        render_scrollable_email_body(f, app, &email, chunks[2]);
+    } else {
+        render_scrollable_email_body(f, app, &email, chunks[1]);
     }
 }
 
@@ -319,31 +319,59 @@ fn format_file_size(bytes: usize) -> String {
     }
 }
 
-fn render_scrollable_email_body(f: &mut Frame, email: &Email, area: Rect, scroll_offset: usize, max_scroll: &mut usize) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title("Body (↑/↓ to scroll, PgUp/PgDn for fast scroll)");
-    let inner = block.inner(area);
-    let inner_width = inner.width as usize;
-    let inner_height = inner.height as usize;
-
-    let content = if let Some(ref html) = email.body_html {
-        html2text::from_read(html.as_bytes(), inner_width)
+fn render_scrollable_email_body(f: &mut Frame, app: &mut App, email: &Email, area: Rect) {
+    let title = if app.remote_images_allowed {
+        "Body (↑/↓ scroll, PgUp/PgDn fast, i: images loaded)"
     } else {
-        let raw = email.body_text.as_deref().unwrap_or("No content");
-        expand_tabs_and_normalize(raw)
+        "Body (↑/↓ scroll, PgUp/PgDn fast, i: load images)"
     };
+    let block = Block::default().borders(Borders::ALL).title(title);
+    let inner = block.inner(area);
 
-    // Count total wrapped lines to compute max scroll
-    let total_lines = count_wrapped_lines(&content, inner_width);
-    *max_scroll = total_lines.saturating_sub(inner_height);
+    if let Some(ref html) = email.body_html {
+        let mut image_map = email.cid_attachments_map();
+        let font_size = app.html_view_state.as_ref()
+            .map(|s| s.font_size()).unwrap_or((8, 16));
 
-    let body = Paragraph::new(content.as_str())
-        .block(block)
-        .wrap(Wrap { trim: false })
-        .scroll((scroll_offset as u16, 0));
+        // Merge fetched remote images into the image map (keyed by decoded URL)
+        if app.remote_images_allowed {
+            for (url, data) in &app.cached_remote_images {
+                image_map.insert(url.clone(), data.clone());
+            }
+        }
 
-    f.render_widget(body, area);
+        let config = tui_html::HtmlRenderConfig {
+            max_image_height: 20,
+            fetch_remote_images: false,
+            cid_attachments: image_map,
+            font_size,
+        };
+
+        let view = tui_html::render_html(html, inner.width, &config);
+        let content_height = view.content_height();
+        let max_scroll = content_height.saturating_sub(inner.height as usize);
+        app.email_view_max_scroll.set(max_scroll);
+        let view = view.scroll(app.email_view_scroll);
+
+        f.render_widget(block, area);
+        if let Some(ref mut state) = app.html_view_state {
+            StatefulWidget::render(view, inner, f.buffer_mut(), state);
+        } else {
+            f.render_widget(view, inner);
+        }
+    } else {
+        // Plain text fallback
+        let raw = email.body_text.as_deref().unwrap_or("No content");
+        let content = expand_tabs_and_normalize(raw);
+        let inner_width = inner.width as usize;
+        let total_lines = count_wrapped_lines(&content, inner_width);
+        app.email_view_max_scroll.set(total_lines.saturating_sub(inner.height as usize));
+        let body = Paragraph::new(content.as_str())
+            .block(block)
+            .wrap(Wrap { trim: false })
+            .scroll((app.email_view_scroll as u16, 0));
+        f.render_widget(body, area);
+    }
 }
 
 /// Count the number of visual lines after word-wrapping text to a given width.
@@ -1336,10 +1364,10 @@ fn render_search_mode(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(search_input, chunks[0]);
 
     // Set cursor position (account for the '/' prefix)
-    f.set_cursor(
+    f.set_cursor_position((
         chunks[0].x + 1 + cursor_display as u16 + 1, // +1 for border, +1 for '/'
         chunks[0].y + 1, // +1 for border
-    );
+    ));
 
     // Search results list
     let result_count = app.search_results.len();
