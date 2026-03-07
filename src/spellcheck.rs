@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::collections::HashSet;
 
 // Embed the practical word lists at compile time
@@ -24,8 +24,6 @@ pub struct SpellError {
 /// Configuration for spell checking
 #[derive(Debug, Clone)]
 pub struct SpellCheckConfig {
-    pub enabled: bool,
-    pub language: String,
     pub max_suggestions: usize,
     pub ignore_uppercase: bool,
     pub ignore_numbers: bool,
@@ -35,8 +33,6 @@ pub struct SpellCheckConfig {
 impl Default for SpellCheckConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
-            language: "en_US".to_string(),
             max_suggestions: 5,
             ignore_uppercase: true,
             ignore_numbers: true,
@@ -284,7 +280,7 @@ impl SpellChecker {
 
     /// Apply common spelling correction patterns
     fn apply_common_corrections(&self, word: &str) -> String {
-        let mut corrected = word.to_string();
+        let corrected = word.to_string();
         
         // Common misspelling patterns
         let patterns = vec![
@@ -345,37 +341,6 @@ impl SpellChecker {
         corrected
     }
 
-    /// Calculate similarity between two words (simple Levenshtein-like algorithm)
-    fn calculate_similarity(&self, word1: &str, word2: &str) -> f64 {
-        if word1 == word2 {
-            return 1.0;
-        }
-        
-        // Simple character-based similarity
-        let chars1: Vec<char> = word1.chars().collect();
-        let chars2: Vec<char> = word2.chars().collect();
-        
-        let len1 = chars1.len();
-        let len2 = chars2.len();
-        
-        if len1 == 0 || len2 == 0 {
-            return 0.0;
-        }
-        
-        let mut matches = 0;
-        let min_len = len1.min(len2);
-        
-        for i in 0..min_len {
-            if chars1[i] == chars2[i] {
-                matches += 1;
-            }
-        }
-        
-        // Bonus for same starting characters
-        let start_bonus = if !chars1.is_empty() && !chars2.is_empty() && chars1[0] == chars2[0] { 0.1 } else { 0.0 };
-        
-        (matches as f64 / len1.max(len2) as f64) + start_bonus
-    }
 
     /// Check spelling of entire text and return errors
     pub fn check_text(&self, text: &str, config: &SpellCheckConfig) -> Vec<SpellError> {
@@ -480,34 +445,6 @@ impl SpellChecker {
         self.personal_dictionary.insert(word.to_lowercase());
     }
 
-    /// Save personal dictionary to file
-    pub fn save_personal_dictionary(&self, path: &str) -> Result<()> {
-        let words: Vec<String> = self.personal_dictionary.iter().cloned().collect();
-        let mut sorted_words = words;
-        sorted_words.sort();
-        
-        let content = sorted_words.join("\n");
-        std::fs::write(path, content)
-            .context("Failed to save personal dictionary")
-    }
-
-    /// Get statistics about the spell check
-    pub fn get_stats(&self, text: &str, config: &SpellCheckConfig) -> SpellCheckStats {
-        let words = Self::extract_words(text);
-        let total_words = words.len();
-        let errors = self.check_text(text, config);
-        let misspelled_words = errors.len();
-        
-        SpellCheckStats {
-            total_words,
-            misspelled_words,
-            accuracy: if total_words > 0 {
-                ((total_words - misspelled_words) as f64 / total_words as f64) * 100.0
-            } else {
-                100.0
-            },
-        }
-    }
 }
 
 /// Word match with position information
@@ -520,7 +457,6 @@ pub struct WordMatch {
 /// Statistics about spell checking results
 #[derive(Debug, Clone)]
 pub struct SpellCheckStats {
-    pub total_words: usize,
     pub misspelled_words: usize,
     pub accuracy: f64,
 }
@@ -580,31 +516,6 @@ mod tests {
         assert!(!checker.is_correct("zxcvbnm"));
     }
 
-    #[test]
-    fn test_stats_consistency() {
-        let config = SpellCheckConfig::default();
-        let checker = SpellChecker::new(&config).unwrap();
-        
-        // Test text with known errors
-        let test_text = "There is a brown crow; have you ever seen a brown crow?";
-        let errors = checker.check_text(test_text, &config);
-        let stats = checker.get_stats(test_text, &config);
-        
-        println!("Text: '{}'", test_text);
-        println!("Errors found: {}", errors.len());
-        println!("Stats misspelled_words: {}", stats.misspelled_words);
-        println!("Stats total_words: {}", stats.total_words);
-        println!("Stats accuracy: {:.1}%", stats.accuracy);
-        
-        // The error count and stats should be consistent
-        assert_eq!(errors.len(), stats.misspelled_words, 
-                   "Error count should match stats misspelled_words");
-        
-        // For this correct text, should be 0 errors
-        assert_eq!(errors.len(), 0, "Should have 0 errors for correct text");
-        assert_eq!(stats.misspelled_words, 0, "Stats should show 0 misspelled words");
-        assert_eq!(stats.accuracy, 100.0, "Accuracy should be 100% for correct text");
-    }
 
     #[test]
     fn test_word_extraction_with_positions() {
@@ -801,36 +712,6 @@ mod tests {
         assert!(!checker.is_similar_quick("short", "toolong"));
     }
 
-    #[test]
-    fn test_calculate_similarity() {
-        let config = SpellCheckConfig::default();
-        let checker = SpellChecker::new(&config).unwrap();
-        assert_eq!(checker.calculate_similarity("hello", "hello"), 1.0);
-        assert_eq!(checker.calculate_similarity("", "abc"), 0.0);
-        assert_eq!(checker.calculate_similarity("abc", ""), 0.0);
-        let sim = checker.calculate_similarity("hello", "hallo");
-        assert!(sim > 0.5);
-    }
-
-    #[test]
-    fn test_stats_with_misspelled_text() {
-        let config = SpellCheckConfig::default();
-        let checker = SpellChecker::new(&config).unwrap();
-        let text = "hello asdfghjkl world";
-        let stats = checker.get_stats(text, &config);
-        assert_eq!(stats.total_words, 3);
-        assert!(stats.misspelled_words >= 1);
-        assert!(stats.accuracy < 100.0);
-    }
-
-    #[test]
-    fn test_stats_empty_text() {
-        let config = SpellCheckConfig::default();
-        let checker = SpellChecker::new(&config).unwrap();
-        let stats = checker.get_stats("", &config);
-        assert_eq!(stats.total_words, 0);
-        assert_eq!(stats.accuracy, 100.0);
-    }
 
     #[test]
     fn test_extract_words_static_matches_extract_words() {

@@ -1401,7 +1401,7 @@ fn create_highlighted_text(text: &str, spell_errors: &[crate::spellcheck::SpellE
     all_errors.sort_by_key(|(pos, _)| *pos);
     
     // Process each line separately
-    for (line_idx, line_text) in lines.iter().enumerate() {
+    for (_line_idx, line_text) in lines.iter().enumerate() {
         let line_start_char = char_offset;
         let line_end_char = char_offset + line_text.chars().count();
         

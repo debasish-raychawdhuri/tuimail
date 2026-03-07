@@ -39,7 +39,7 @@ pub struct AsyncGrammarChecker {
 impl AsyncGrammarChecker {
     /// Create a new async grammar checker
     pub fn new() -> Result<Self> {
-        let (msg_sender, mut msg_receiver) = mpsc::unbounded_channel::<GrammarCheckMessage>();
+        let (msg_sender, msg_receiver) = mpsc::unbounded_channel::<GrammarCheckMessage>();
         let (response_sender, response_receiver) = mpsc::unbounded_channel::<GrammarCheckResponse>();
         
         // Initialize the grammar checker
@@ -187,13 +187,3 @@ impl Drop for AsyncGrammarChecker {
     }
 }
 
-/// Helper to determine field type from compose field enum
-pub fn compose_field_to_string(field: &crate::app::ComposeField) -> String {
-    match field {
-        crate::app::ComposeField::To => "To".to_string(),
-        crate::app::ComposeField::Cc => "Cc".to_string(),
-        crate::app::ComposeField::Bcc => "Bcc".to_string(),
-        crate::app::ComposeField::Subject => "Subject".to_string(),
-        crate::app::ComposeField::Body => "Body".to_string(),
-    }
-}

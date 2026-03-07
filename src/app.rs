@@ -25,27 +25,6 @@ pub fn update_global_sync_timestamp(account_email: &str, folder: &str, timestamp
     }
 }
 
-pub fn has_new_emails_since_global(account_email: &str, folder: &str, ui_timestamp: DateTime<Utc>) -> bool {
-    let key = format!("{}:{}", account_email, folder);
-    if let Ok(timestamps) = get_global_sync_timestamps().read() {
-        if let Some(latest_sync) = timestamps.get(&key) {
-            *latest_sync > ui_timestamp
-        } else {
-            true // If we don't have a sync timestamp, assume there might be new emails
-        }
-    } else {
-        true
-    }
-}
-
-pub fn get_global_sync_timestamp(account_email: &str, folder: &str) -> Option<DateTime<Utc>> {
-    let key = format!("{}:{}", account_email, folder);
-    if let Ok(timestamps) = get_global_sync_timestamps().read() {
-        timestamps.get(&key).copied()
-    } else {
-        None
-    }
-}
 
 #[derive(Error, Debug)]
 pub enum AppError {
@@ -118,7 +97,6 @@ pub struct AccountData {
     pub account: EmailAccount,  // Add reference to the account
     pub folders: Vec<String>,
     pub emails: Vec<crate::email::EmailSummary>,
-    pub selected_folder_idx: usize,
     pub email_client: Option<EmailClient>,
 }
 
@@ -128,7 +106,6 @@ impl AccountData {
             account,
             folders: vec!["INBOX".to_string()],
             emails: Vec::new(),
-            selected_folder_idx: 0,
             email_client: None,
         }
     }
@@ -218,9 +195,6 @@ pub struct App {
     pub sync_notify_rx: Option<std::sync::mpsc::Receiver<()>>,
     pub sync_notify_tx: std::sync::mpsc::Sender<()>,
 
-    // UI timestamp tracking for efficient new email detection
-    pub ui_timestamps: std::collections::HashMap<String, chrono::DateTime<chrono::Utc>>,
-    
     // Address field parsing optimization
     pub address_fields_dirty: bool,
 
@@ -396,9 +370,6 @@ impl App {
             sync_notify_rx: None,
             sync_notify_tx: sync_tx,
 
-            // UI timestamp tracking
-            ui_timestamps: std::collections::HashMap::new(),
-            
             // Address field parsing optimization
             address_fields_dirty: false,
 
@@ -578,83 +549,6 @@ impl App {
         self.check_spelling_full(&text, &config);
     }
 
-    /// Calculate text similarity (simple ratio)
-    fn calculate_text_similarity(&self, text1: &str, text2: &str) -> f64 {
-        if text1.is_empty() && text2.is_empty() {
-            return 1.0;
-        }
-        if text1.is_empty() || text2.is_empty() {
-            return 0.0;
-        }
-        
-        let len1 = text1.len();
-        let len2 = text2.len();
-        let max_len = len1.max(len2);
-        
-        // Simple similarity based on length and common prefix
-        let common_prefix = text1.chars()
-            .zip(text2.chars())
-            .take_while(|(a, b)| a == b)
-            .count();
-            
-        (common_prefix as f64) / (max_len as f64)
-    }
-
-    /// Check if we can do incremental spell checking
-    fn can_do_incremental_check(&self, current_text: &str) -> bool {
-        // Skip spell checking for small changes to avoid performance issues
-        // and moving highlights
-        
-        let text_len_diff = current_text.len() as i32 - self.last_checked_text.len() as i32;
-        
-        // Skip if text length difference is small (1-3 characters)
-        if text_len_diff.abs() <= 3 {
-            return true; // Skip checking
-        }
-        
-        // Skip if texts are very similar (small edits)
-        let similarity = self.calculate_text_similarity(current_text, &self.last_checked_text);
-        if similarity > 0.9 {
-            return true; // Skip checking
-        }
-        
-        // Do full check for significant changes
-        false
-    }
-
-    /// Adjust positions of existing spell errors when text changes
-    fn adjust_error_positions(&mut self, text_len_diff: i32, change_position: usize) {
-        if text_len_diff == 0 {
-            return; // No change in text length
-        }
-        
-        for error in &mut self.spell_errors {
-            // Only adjust errors that come after the change position
-            if error.position > change_position {
-                if text_len_diff > 0 {
-                    // Text was added, shift positions forward
-                    error.position = error.position.saturating_add(text_len_diff as usize);
-                } else {
-                    // Text was removed, shift positions backward
-                    let reduction = (-text_len_diff) as usize;
-                    if error.position >= change_position + reduction {
-                        error.position = error.position.saturating_sub(reduction);
-                    } else {
-                        // Error position would be invalid, remove it
-                        error.position = change_position;
-                    }
-                }
-            }
-        }
-        
-        // Remove any errors with invalid positions
-        let text_len = self.last_checked_text.len();
-        self.spell_errors.retain(|error| {
-            error.position < text_len && 
-            error.position + error.word.len() <= text_len
-        });
-    }
-
     /// Full spell check - check entire text
     fn check_spelling_full(&mut self, text: &str, config: &crate::spellcheck::SpellCheckConfig) {
         if let Some(ref checker) = self.spell_checker {
@@ -667,70 +561,6 @@ impl App {
         }
     }
 
-    /// Find word at cursor position
-    fn find_word_at_cursor(&self, text: &str, cursor_pos: usize) -> Option<(usize, usize, String)> {
-        if cursor_pos > text.len() {
-            return None;
-        }
-        
-        // Find word boundaries around cursor
-        let mut word_start = cursor_pos;
-        let mut word_end = cursor_pos;
-        
-        let chars: Vec<char> = text.chars().collect();
-        
-        // Find start of word (go backwards)
-        while word_start > 0 {
-            let ch = chars.get(word_start.saturating_sub(1))?;
-            if ch.is_alphabetic() || *ch == '\'' || *ch == '-' {
-                word_start -= 1;
-            } else {
-                break;
-            }
-        }
-        
-        // Find end of word (go forwards)
-        while word_end < chars.len() {
-            let ch = chars.get(word_end)?;
-            if ch.is_alphabetic() || *ch == '\'' || *ch == '-' {
-                word_end += 1;
-            } else {
-                break;
-            }
-        }
-        
-        if word_start == word_end {
-            return None;
-        }
-        
-        let word: String = chars[word_start..word_end].iter().collect();
-        if word.trim().is_empty() {
-            return None;
-        }
-        
-        Some((word_start, word_end, word))
-    }
-
-    /// Check if word should be skipped (simple version)
-    fn should_skip_word(&self, word: &str) -> bool {
-        // Skip very short words, numbers, etc.
-        if word.len() < 2 {
-            return true;
-        }
-        
-        // Skip if it's all numbers
-        if word.chars().all(|c| c.is_numeric()) {
-            return true;
-        }
-        
-        // Skip if it's all uppercase (might be acronym)
-        if word.len() < 4 && word.chars().all(|c| c.is_uppercase()) {
-            return true;
-        }
-        
-        false
-    }
-    
     /// Request async grammar check of current compose field
     pub fn request_grammar_check(&mut self) {
         if !self.grammar_check_enabled {
@@ -1020,7 +850,6 @@ impl App {
         let misspelled_words = self.spell_errors.len();
         
         Some(crate::spellcheck::SpellCheckStats {
-            total_words,
             misspelled_words,
             accuracy: if total_words > 0 {
                 let correct_words = total_words.saturating_sub(misspelled_words);
@@ -1050,14 +879,12 @@ impl App {
             ComposeField::To | ComposeField::Cc | ComposeField::Bcc => return None,
         };
 
-        // Estimate sentence count (rough approximation)
+        let error_count = self.grammar_errors.len();
         let sentence_count = text.split(['.', '!', '?'])
             .filter(|s| !s.trim().is_empty())
             .count();
-        let error_count = self.grammar_errors.len();
-        
+
         Some(crate::grammarcheck::GrammarCheckStats {
-            sentence_count,
             error_count,
             quality_score: if sentence_count > 0 {
                 100.0 - ((error_count as f64 / sentence_count as f64) * 100.0).min(100.0)
@@ -1543,35 +1370,6 @@ impl App {
         }
     }
 
-    /// Request sync if data is stale (older than 5 minutes)
-    fn request_sync_if_stale(&self, account_email: &str, folder: &str) -> AppResult<()> {
-        const MAX_AGE_SECONDS: i64 = 300; // 5 minutes
-        
-        match self.database.is_sync_stale(account_email, folder, MAX_AGE_SECONDS) {
-            Ok(true) => {
-                debug_log(&format!("Data is stale for {}/{}, requesting sync", account_email, folder));
-                // In a full implementation, this would send a signal to the sync daemon
-                // For now, we'll just log it
-                Ok(())
-            }
-            Ok(false) => {
-                debug_log(&format!("Data is fresh for {}/{}", account_email, folder));
-                Ok(())
-            }
-            Err(e) => {
-                debug_log(&format!("Failed to check sync staleness: {}", e));
-                Ok(())
-            }
-        }
-    }
-
-    /// Request immediate sync for empty folders
-    fn request_immediate_sync(&self, account_email: &str, folder: &str) -> AppResult<()> {
-        debug_log(&format!("Requesting immediate sync for {}/{}", account_email, folder));
-        // In a full implementation, this would send a high-priority signal to the sync daemon
-        // For now, we'll just log it
-        Ok(())
-    }
 
     /// Queue an email operation for background processing with explicit folder
     pub fn queue_email_operation_for_folder(&mut self, operation_type: &str, email_uid: u32, folder: &str, target_folder: Option<&str>) -> AppResult<()> {
@@ -1594,78 +1392,6 @@ impl App {
         Ok(())
     }
 
-    /// Queue an email operation for background processing
-    pub fn queue_email_operation(&mut self, operation_type: &str, email_uid: u32, target_folder: Option<&str>) -> AppResult<()> {
-        if let Some((account_idx, folder_path)) = self.get_selected_folder_info() {
-            if let Some(account_data) = self.accounts.get(&account_idx) {
-                let account_email = &account_data.account.email;
-                
-                // Queue the operation in database
-                self.database.queue_email_operation(
-                    account_email,
-                    operation_type,
-                    email_uid,
-                    &folder_path,
-                    target_folder
-                )?;
-                
-                debug_log(&format!(
-                    "Queued {} operation for email {} in {}/{}",
-                    operation_type, email_uid, account_email, folder_path
-                ));
-                
-                // Update local state immediately for responsive UI
-                match operation_type {
-                    "mark_read" => {
-                        if let Some(email) = self.emails.iter_mut().find(|e| e.id == email_uid.to_string()) {
-                            email.seen = true;
-                        }
-                        // Also update in account data
-                        if let Some(account_data) = self.accounts.get_mut(&account_idx) {
-                            if let Some(email) = account_data.emails.iter_mut().find(|e| e.id == email_uid.to_string()) {
-                                email.seen = true;
-                            }
-                        }
-                    }
-                    "mark_unread" => {
-                        if let Some(email) = self.emails.iter_mut().find(|e| e.id == email_uid.to_string()) {
-                            email.seen = false;
-                        }
-                        // Also update in account data
-                        if let Some(account_data) = self.accounts.get_mut(&account_idx) {
-                            if let Some(email) = account_data.emails.iter_mut().find(|e| e.id == email_uid.to_string()) {
-                                email.seen = false;
-                            }
-                        }
-                    }
-                    "delete" => {
-                        // Remove from local state immediately
-                        self.emails.retain(|e| e.id != email_uid.to_string());
-                        if let Some(account_data) = self.accounts.get_mut(&account_idx) {
-                            account_data.emails.retain(|e| e.id != email_uid.to_string());
-                        }
-                        // Adjust selection if needed
-                        if let Some(idx) = self.selected_email_idx {
-                            if idx >= self.emails.len() && !self.emails.is_empty() {
-                                self.selected_email_idx = Some(self.emails.len() - 1);
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-                
-                Ok(())
-            } else {
-                Err(AppError::EmailError(crate::email::EmailError::ImapError(
-                    "Account not found".to_string(),
-                )))
-            }
-        } else {
-            Err(AppError::EmailError(crate::email::EmailError::ImapError(
-                "No folder selected".to_string(),
-            )))
-        }
-    }
 
     /// Get the per-account database for the current account
     fn get_account_database(&self) -> Option<crate::database::EmailDatabase> {
@@ -1732,53 +1458,6 @@ impl App {
         Ok(())
     }
 
-    /// Mark current email as unread (queue operation)
-    pub fn mark_current_email_as_unread(&mut self) -> AppResult<()> {
-        if let Some(idx) = self.selected_email_idx {
-            if idx < self.emails.len() {
-                let email = &self.emails[idx];
-                if email.seen {
-                    let email_uid: u32 = email.id.parse().unwrap_or(0);
-                    let email_folder = email.folder.clone();
-                    let account_email = self.config.accounts[self.current_account_idx].email.clone();
-
-                    // 1. Queue the operation for server sync (use email's folder directly)
-                    self.queue_email_operation_for_folder("mark_unread", email_uid, &email_folder, None)?;
-
-                    // 2. Update both databases immediately
-                    self.update_seen_in_all_databases(&account_email, &email_folder, email_uid, false);
-
-                    // 3. Update UI state immediately
-                    self.emails[idx].seen = false;
-
-                    // Also update the account's email list so it persists across folder switches
-                    if let Some(account_data) = self.accounts.get_mut(&self.current_account_idx) {
-                        if let Some(acct_email) = account_data.emails.iter_mut().find(|e| e.id == self.emails[idx].id && e.folder == email_folder) {
-                            acct_email.seen = false;
-                        }
-                    }
-
-                    debug_log(&format!("Marked email UID {} as unread locally and queued server sync", email_uid));
-
-                    // 4. Trigger immediate background processing for responsiveness
-                    self.trigger_immediate_sync()?;
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// Delete current email (queue operation)
-    pub fn delete_current_email(&mut self) -> AppResult<()> {
-        if let Some(idx) = self.selected_email_idx {
-            if idx < self.emails.len() {
-                let email = &self.emails[idx];
-                let email_uid: u32 = email.id.parse().unwrap_or(0);
-                self.queue_email_operation("delete", email_uid, None)?;
-            }
-        }
-        Ok(())
-    }
 
     /// Trigger immediate background sync for pending operations
     pub fn trigger_immediate_sync(&mut self) -> AppResult<()> {
@@ -1868,7 +1547,7 @@ impl App {
                 // Process queued operations first
                 match database.get_pending_operations() {
                     Ok(operations) => {
-                        for (op_id, account_email, operation_type, email_uid, folder, target_folder) in operations {
+                        for (op_id, account_email, operation_type, email_uid, folder, _target_folder) in operations {
                             if !running_flag.load(Ordering::Relaxed) {
                                 break;
                             }
@@ -4380,118 +4059,6 @@ impl App {
         self.fetcher_running = None;
     }
 
-    /// Check for new emails by polling the database
-    pub fn check_for_new_emails(&mut self) {
-        // Get current account and folder
-        if let Some(account_data) = self.accounts.get(&self.current_account_idx) {
-            let account_email = account_data.account.email.clone();
-            let folder = self.selected_folder.clone();
-
-            // Use the per-account database (where emails are actually stored)
-            let acct_cache_dir = format!("{}/.cache/tuimail/{}",
-                dirs::home_dir().unwrap_or_default().display(),
-                account_email.replace('@', "_at_").replace('.', "_"));
-            let acct_db_path = std::path::PathBuf::from(&acct_cache_dir).join("emails.db");
-            let db = match crate::database::EmailDatabase::new(&acct_db_path) {
-                Ok(db) => db,
-                Err(e) => {
-                    debug_log(&format!("Failed to open account database for polling: {}", e));
-                    return;
-                }
-            };
-
-            // Load email summaries from per-account database
-            match db.get_recent_email_summaries(&account_email, &folder, 500) {
-                Ok(db_summaries) => {
-                    // Check if we have new emails compared to what's currently in UI
-                    let current_email_ids: std::collections::HashSet<String> =
-                        self.emails.iter().map(|e| e.id.clone()).collect();
-
-                    let new_summaries: Vec<crate::email::EmailSummary> = db_summaries
-                        .iter()
-                        .filter(|email| !current_email_ids.contains(&email.id))
-                        .cloned()
-                        .collect();
-
-                    if !new_summaries.is_empty() {
-                        debug_log(&format!(
-                            "Found {} new emails in database",
-                            new_summaries.len()
-                        ));
-
-                        let new_count = new_summaries.len();
-
-                        // Merge new emails with existing ones
-                        let mut all_emails = self.emails.clone();
-                        all_emails.extend(new_summaries);
-
-                        // Remove duplicates based on email ID (UID)
-                        let mut seen_ids = std::collections::HashSet::new();
-                        all_emails.retain(|email| {
-                            if seen_ids.contains(&email.id) {
-                                false
-                            } else {
-                                seen_ids.insert(email.id.clone());
-                                true
-                            }
-                        });
-
-                        // Sort by date - newest first (descending order)
-                        all_emails.sort_by(|a, b| b.date.cmp(&a.date));
-
-                        debug_log(&format!(
-                            "Merged emails: {} new + {} existing = {} total (after dedup and sort)",
-                            new_count,
-                            self.emails.len(),
-                            all_emails.len()
-                        ));
-
-                        self.emails = all_emails;
-
-                        // Update the account's cached emails
-                        if let Some(account_data) = self.accounts.get_mut(&self.current_account_idx)
-                        {
-                            account_data.emails = self.emails.clone();
-                        }
-
-                        // Keep current selection if valid, otherwise select first email
-                        if let Some(selected_idx) = self.selected_email_idx {
-                            if selected_idx >= self.emails.len() {
-                                self.selected_email_idx = if self.emails.is_empty() {
-                                    None
-                                } else {
-                                    Some(0)
-                                };
-                            }
-                        } else if !self.emails.is_empty() {
-                            self.selected_email_idx = Some(0);
-                        }
-
-                        self.show_info(&format!("Found {} new emails", new_count));
-                    } else {
-                        // Update emails from database even if no new ones (in case of changes)
-                        if db_summaries.len() != self.emails.len() {
-                            debug_log(&format!(
-                                "Email count changed: {} in DB vs {} in UI, updating",
-                                db_summaries.len(),
-                                self.emails.len()
-                            ));
-                            self.emails = db_summaries;
-
-                            // Update the account's cached emails
-                            if let Some(account_data) = self.accounts.get_mut(&self.current_account_idx)
-                            {
-                                account_data.emails = self.emails.clone();
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    debug_log(&format!("Failed to load emails from database: {}", e));
-                }
-            }
-        }
-    }
 
     pub fn delete_selected_email(&mut self) -> AppResult<()> {
         if let Some(idx) = self.selected_email_idx {
