@@ -138,6 +138,7 @@ pub struct App {
 
     // Scrolling state
     pub email_view_scroll: usize,
+    pub email_view_max_scroll: std::cell::Cell<usize>,
 
     // Sync status
     pub last_sync: Option<DateTime<Local>>,
@@ -316,6 +317,7 @@ impl App {
             message_timeout: None,
 
             email_view_scroll: 0,
+            email_view_max_scroll: std::cell::Cell::new(0),
             last_sync: None,
             is_syncing: false,
             compose_field: ComposeField::To,
@@ -2660,7 +2662,10 @@ impl App {
                 Ok(())
             }
             KeyCode::Down => {
-                self.email_view_scroll += 1;
+                let max = self.email_view_max_scroll.get();
+                if self.email_view_scroll < max {
+                    self.email_view_scroll += 1;
+                }
                 Ok(())
             }
             KeyCode::PageUp => {
@@ -2668,11 +2673,16 @@ impl App {
                 Ok(())
             }
             KeyCode::PageDown => {
-                self.email_view_scroll += 10;
+                let max = self.email_view_max_scroll.get();
+                self.email_view_scroll = (self.email_view_scroll + 10).min(max);
                 Ok(())
             }
             KeyCode::Home => {
                 self.email_view_scroll = 0;
+                Ok(())
+            }
+            KeyCode::End => {
+                self.email_view_scroll = self.email_view_max_scroll.get();
                 Ok(())
             }
             KeyCode::Char('r') => {

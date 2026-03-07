@@ -218,12 +218,15 @@ fn render_view_email_mode(f: &mut Frame, app: &App, area: Rect) {
 
         render_email_header(f, email, chunks[0]);
 
+        let scroll = app.email_view_scroll;
+        let mut max_scroll = 0;
         if !email.attachments.is_empty() {
             render_email_attachments(f, app, email, chunks[1]);
-            render_scrollable_email_body(f, email, chunks[2], app.email_view_scroll);
+            render_scrollable_email_body(f, email, chunks[2], scroll, &mut max_scroll);
         } else {
-            render_scrollable_email_body(f, email, chunks[1], app.email_view_scroll);
+            render_scrollable_email_body(f, email, chunks[1], scroll, &mut max_scroll);
         }
+        app.email_view_max_scroll.set(max_scroll);
     }
 }
 
@@ -280,19 +283,24 @@ fn format_file_size(bytes: usize) -> String {
     }
 }
 
-fn render_scrollable_email_body(f: &mut Frame, email: &Email, area: Rect, scroll_offset: usize) {
+fn render_scrollable_email_body(f: &mut Frame, email: &Email, area: Rect, scroll_offset: usize, max_scroll: &mut usize) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title("Body (↑/↓ to scroll, PgUp/PgDn for fast scroll)");
-    let inner_width = block.inner(area).width as usize;
+    let inner = block.inner(area);
+    let inner_width = inner.width as usize;
+    let inner_height = inner.height as usize;
 
     let content = if let Some(ref html) = email.body_html {
-        // Render HTML to text at the actual terminal width
         html2text::from_read(html.as_bytes(), inner_width)
     } else {
         let raw = email.body_text.as_deref().unwrap_or("No content");
         expand_tabs_and_normalize(raw)
     };
+
+    // Count total wrapped lines to compute max scroll
+    let total_lines = count_wrapped_lines(&content, inner_width);
+    *max_scroll = total_lines.saturating_sub(inner_height);
 
     let body = Paragraph::new(content.as_str())
         .block(block)
@@ -300,6 +308,23 @@ fn render_scrollable_email_body(f: &mut Frame, email: &Email, area: Rect, scroll
         .scroll((scroll_offset as u16, 0));
 
     f.render_widget(body, area);
+}
+
+/// Count the number of visual lines after word-wrapping text to a given width.
+fn count_wrapped_lines(text: &str, width: usize) -> usize {
+    if width == 0 {
+        return text.lines().count().max(1);
+    }
+    let mut total = 0;
+    for line in text.split('\n') {
+        let line_width: usize = line.chars().count();
+        if line_width == 0 {
+            total += 1;
+        } else {
+            total += (line_width + width - 1) / width;
+        }
+    }
+    total
 }
 
 /// Expand tab characters to spaces at standard 8-column tab stops and strip \r.
