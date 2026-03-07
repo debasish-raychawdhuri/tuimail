@@ -329,35 +329,47 @@ fn render_scrollable_email_body(f: &mut Frame, app: &mut App, email: &Email, are
     let inner = block.inner(area);
 
     if let Some(ref html) = email.body_html {
-        let mut image_map = email.cid_attachments_map();
-        let font_size = app.html_view_state.as_ref()
-            .map(|s| s.font_size()).unwrap_or((8, 16));
+        let image_count = app.cached_remote_images.len();
+        // Rebuild the cached HtmlView only when content or dimensions change
+        let needs_rebuild = app.cached_html_view.is_none()
+            || app.cached_html_view_width != inner.width
+            || app.cached_html_view_image_count != image_count;
 
-        // Merge fetched remote images into the image map (keyed by decoded URL)
-        if app.remote_images_allowed {
-            for (url, data) in &app.cached_remote_images {
-                image_map.insert(url.clone(), data.clone());
+        if needs_rebuild {
+            let mut image_map = email.cid_attachments_map();
+            let font_size = app.html_view_state.as_ref()
+                .map(|s| s.font_size()).unwrap_or((8, 16));
+
+            if app.remote_images_allowed {
+                for (url, data) in &app.cached_remote_images {
+                    image_map.insert(url.clone(), data.clone());
+                }
             }
+
+            let config = tui_html::HtmlRenderConfig {
+                max_image_height: 20,
+                fetch_remote_images: false,
+                cid_attachments: image_map,
+                font_size,
+            };
+
+            let view = tui_html::render_html(html, inner.width, &config);
+            app.cached_html_view_width = inner.width;
+            app.cached_html_view_image_count = image_count;
+            app.cached_html_view = Some(view);
         }
 
-        let config = tui_html::HtmlRenderConfig {
-            max_image_height: 20,
-            fetch_remote_images: false,
-            cid_attachments: image_map,
-            font_size,
-        };
+        if let Some(ref mut view) = app.cached_html_view {
+            let content_height = view.content_height();
+            let max_scroll = content_height.saturating_sub(inner.height as usize);
+            app.email_view_max_scroll.set(max_scroll);
+            view.set_scroll(app.email_view_scroll);
 
-        let view = tui_html::render_html(html, inner.width, &config);
-        let content_height = view.content_height();
-        let max_scroll = content_height.saturating_sub(inner.height as usize);
-        app.email_view_max_scroll.set(max_scroll);
-        let view = view.scroll(app.email_view_scroll);
-
-        f.render_widget(block, area);
-        if let Some(ref mut state) = app.html_view_state {
-            StatefulWidget::render(view, inner, f.buffer_mut(), state);
-        } else {
-            f.render_widget(view, inner);
+            f.render_widget(block, area);
+            if let Some(ref mut state) = app.html_view_state {
+                let view_ref: &tui_html::HtmlView = view;
+                StatefulWidget::render(view_ref, inner, f.buffer_mut(), state);
+            }
         }
     } else {
         // Plain text fallback

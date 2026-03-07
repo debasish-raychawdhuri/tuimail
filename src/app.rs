@@ -203,6 +203,9 @@ pub struct App {
     pub cached_remote_images: HashMap<String, Vec<u8>>,
     pub image_fetch_rx: Option<std::sync::mpsc::Receiver<(String, Vec<u8>)>>,
     pub image_fetch_pending: bool,
+    pub cached_html_view: Option<tui_html::HtmlView>,
+    pub cached_html_view_width: u16,
+    pub cached_html_view_image_count: usize,
 
     // Address field parsing optimization
     pub address_fields_dirty: bool,
@@ -387,6 +390,9 @@ impl App {
             cached_remote_images: HashMap::new(),
             image_fetch_rx: None,
             image_fetch_pending: false,
+            cached_html_view: None,
+            cached_html_view_width: 0,
+            cached_html_view_image_count: 0,
 
             // Address field parsing optimization
             address_fields_dirty: false,
@@ -2741,6 +2747,7 @@ impl App {
                 Ok(())
             }
             KeyCode::Char('i') => {
+                self.cached_html_view = None;
                 if !self.remote_images_allowed {
                     self.remote_images_allowed = true;
                     self.fetch_remote_images_for_current_email();
@@ -2764,6 +2771,7 @@ impl App {
         self.cached_remote_images.clear();
         self.image_fetch_pending = false;
         self.image_fetch_rx = None;
+        self.cached_html_view = None;
         if let Some(ref mut state) = self.html_view_state {
             state.clear_cache();
         }
@@ -2831,7 +2839,8 @@ impl App {
             }
         }
         if got_any {
-            // Clear image protocol cache so re-render picks up new images
+            // Invalidate cached view and image protocol cache so re-render picks up new images
+            self.cached_html_view = None;
             if let Some(ref mut state) = self.html_view_state {
                 state.clear_cache();
             }
