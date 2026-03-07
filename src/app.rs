@@ -206,8 +206,6 @@ pub struct App {
     pub cached_html_view: Option<tui_html::HtmlView>,
     pub cached_html_view_width: u16,
     pub cached_html_view_image_count: usize,
-    pub cached_html_buffer: Option<ratatui::buffer::Buffer>,
-
     // Address field parsing optimization
     pub address_fields_dirty: bool,
 
@@ -394,7 +392,6 @@ impl App {
             cached_html_view: None,
             cached_html_view_width: 0,
             cached_html_view_image_count: 0,
-            cached_html_buffer: None,
 
             // Address field parsing optimization
             address_fields_dirty: false,
@@ -2750,7 +2747,6 @@ impl App {
             }
             KeyCode::Char('i') => {
                 self.cached_html_view = None;
-                self.cached_html_buffer = None;
                 if !self.remote_images_allowed {
                     self.remote_images_allowed = true;
                     self.fetch_remote_images_for_current_email();
@@ -2775,7 +2771,6 @@ impl App {
         self.image_fetch_pending = false;
         self.image_fetch_rx = None;
         self.cached_html_view = None;
-        self.cached_html_buffer = None;
         if let Some(ref mut state) = self.html_view_state {
             state.clear_cache();
         }
@@ -2845,7 +2840,6 @@ impl App {
         if got_any {
             // Invalidate cached view/buffer and image protocol cache
             self.cached_html_view = None;
-            self.cached_html_buffer = None;
             if let Some(ref mut state) = self.html_view_state {
                 state.clear_cache();
             }
