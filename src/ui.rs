@@ -197,6 +197,11 @@ fn render_email_list(f: &mut Frame, app: &App, area: Rect) {
 
 fn render_view_email_mode(f: &mut Frame, app: &App, area: Rect) {
     if let Some(email) = &app.viewed_email {
+        if app.show_raw_headers {
+            render_raw_headers(f, email, area, app.email_view_scroll, &app.email_view_max_scroll);
+            return;
+        }
+
         // Determine layout based on whether there are attachments
         let constraints = if email.attachments.is_empty() {
             vec![
@@ -228,6 +233,37 @@ fn render_view_email_mode(f: &mut Frame, app: &App, area: Rect) {
         }
         app.email_view_max_scroll.set(max_scroll);
     }
+}
+
+fn render_raw_headers(f: &mut Frame, email: &Email, area: Rect, scroll_offset: usize, max_scroll: &std::cell::Cell<usize>) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("Raw Headers (h: back, ↑/↓ to scroll)");
+    let inner = block.inner(area);
+    let inner_width = inner.width as usize;
+    let inner_height = inner.height as usize;
+
+    // Build header text sorted by key
+    let mut headers: Vec<(&String, &String)> = email.headers.iter().collect();
+    headers.sort_by_key(|(k, _)| k.to_lowercase());
+
+    let mut text = String::new();
+    for (key, value) in &headers {
+        text.push_str(key);
+        text.push_str(": ");
+        text.push_str(value);
+        text.push('\n');
+    }
+
+    let total_lines = count_wrapped_lines(&text, inner_width);
+    max_scroll.set(total_lines.saturating_sub(inner_height));
+
+    let paragraph = Paragraph::new(text.as_str())
+        .block(block)
+        .wrap(Wrap { trim: false })
+        .scroll((scroll_offset as u16, 0));
+
+    f.render_widget(paragraph, area);
 }
 
 fn render_email_attachments(f: &mut Frame, app: &App, email: &Email, area: Rect) {

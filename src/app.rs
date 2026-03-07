@@ -139,6 +139,7 @@ pub struct App {
     // Scrolling state
     pub email_view_scroll: usize,
     pub email_view_max_scroll: std::cell::Cell<usize>,
+    pub show_raw_headers: bool,
 
     // Sync status
     pub last_sync: Option<DateTime<Local>>,
@@ -318,6 +319,7 @@ impl App {
 
             email_view_scroll: 0,
             email_view_max_scroll: std::cell::Cell::new(0),
+            show_raw_headers: false,
             last_sync: None,
             is_syncing: false,
             compose_field: ComposeField::To,
@@ -2646,7 +2648,8 @@ impl App {
     fn handle_view_mode(&mut self, key: KeyEvent) -> AppResult<()> {
         match key.code {
             KeyCode::Esc => {
-                self.email_view_scroll = 0; // Reset scroll when exiting
+                self.email_view_scroll = 0;
+                self.show_raw_headers = false;
                 if self.search_active {
                     // Return to search results
                     self.mode = AppMode::Search;
@@ -2714,6 +2717,11 @@ impl App {
             KeyCode::BackTab => {
                 // Navigate through attachments (reverse)
                 self.select_previous_attachment();
+                Ok(())
+            }
+            KeyCode::Char('h') => {
+                self.show_raw_headers = !self.show_raw_headers;
+                self.email_view_scroll = 0;
                 Ok(())
             }
             _ => Ok(()),
