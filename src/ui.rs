@@ -330,7 +330,6 @@ fn render_scrollable_email_body(f: &mut Frame, app: &mut App, email: &Email, are
 
     if let Some(ref html) = email.body_html {
         let image_count = app.cached_remote_images.len();
-        // Rebuild the cached HtmlView only when content or dimensions change
         let needs_rebuild = app.cached_html_view.is_none()
             || app.cached_html_view_width != inner.width
             || app.cached_html_view_image_count != image_count;
