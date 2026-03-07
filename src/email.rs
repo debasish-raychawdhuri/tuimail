@@ -1949,602 +1949,121 @@ impl EmailClient {
         }
     }
     
-    /// Fetch only new emails since the last known count
-    fn fetch_new_emails_since_count(&self, folder: &str, last_count: usize) -> Result<Vec<Email>, EmailError> {
-        debug_log(&format!("Fetching new emails since count: {}", last_count));
-        
-        match self.account.imap_security {
-            ImapSecurity::SSL | ImapSecurity::StartTLS => {
-                self.fetch_new_emails_since_count_secure(folder, last_count)
-            }
-            ImapSecurity::None => {
-                self.fetch_new_emails_since_count_plain(folder, last_count)
-            }
-        }
-    }
-    
-    fn fetch_new_emails_since_count_secure(&self, folder: &str, last_count: usize) -> Result<Vec<Email>, EmailError> {
-        let mut session = self.connect_imap_with_security()?;
-        session.select(folder)
-            .map_err(|e| EmailError::ImapError(e.to_string()))?;
-        
-        // Get current message count
-        let current_count = session.search("ALL")
-            .map_err(|e| EmailError::ImapError(e.to_string()))?
-            .len();
-        
-        if current_count <= last_count {
-            debug_log("No new emails to fetch");
-            return Ok(Vec::new());
-        }
-        
-        let new_message_count = current_count - last_count;
-        debug_log(&format!("Fetching {} new emails (messages {}-{})", 
-            new_message_count, last_count + 1, current_count));
-        
-        // Fetch only the new messages
-        let sequence = format!("{}:{}", last_count + 1, current_count);
-        let messages = session
-            .fetch(sequence, "(RFC822 FLAGS UID)")
-            .map_err(|e| EmailError::ImapError(e.to_string()))?;
-        
-        let mut emails = Vec::new();
-        for (i, message) in messages.iter().enumerate() {
-            if let Some(body) = message.body() {
-                let flags: Vec<String> = message.flags().iter().map(|f| f.to_string()).collect();
-                // Skip messages without valid UIDs
-                let uid = match message.uid {
-                    Some(uid) if uid > 0 => uid.to_string(),
-                    _ => {
-                        debug_log(&format!("Message {} has invalid UID ({:?}), skipping", i + 1, message.uid));
-                        continue;
-                    }
-                };
-                
-                debug_log(&format!("Processing new email {}: UID={}, size={} bytes, flags={:?}", 
-                    i + 1, uid, body.len(), flags));
-                
-                match mail_parser::Message::parse(body) {
-                    Some(parsed) => {
-                        match Email::from_parsed_email(&parsed, &uid, folder, flags) {
-                            Ok(email) => {
-                                emails.push(email);
-                            }
-                            Err(e) => {
-                                debug_log(&format!("Failed to create email object: {}", e));
-                            }
-                        }
-                    }
-                    None => {
-                        debug_log("Failed to parse email");
-                    }
-                }
-            }
-        }
-        
-        debug_log(&format!("Successfully fetched {} new emails", emails.len()));
-        Ok(emails)
-    }
-    
-    fn fetch_new_emails_since_count_plain(&self, folder: &str, last_count: usize) -> Result<Vec<Email>, EmailError> {
-        let mut session = self.connect_imap_plain()?;
-        session.select(folder)
-            .map_err(|e| EmailError::ImapError(e.to_string()))?;
-        
-        // Get current message count
-        let current_count = session.search("ALL")
-            .map_err(|e| EmailError::ImapError(e.to_string()))?
-            .len();
-        
-        if current_count <= last_count {
-            debug_log("No new emails to fetch");
-            return Ok(Vec::new());
-        }
-        
-        let new_message_count = current_count - last_count;
-        debug_log(&format!("Fetching {} new emails (messages {}-{})", 
-            new_message_count, last_count + 1, current_count));
-        
-        // Fetch only the new messages
-        let sequence = format!("{}:{}", last_count + 1, current_count);
-        let messages = session
-            .fetch(sequence, "(RFC822 FLAGS UID)")
-            .map_err(|e| EmailError::ImapError(e.to_string()))?;
-        
-        let mut emails = Vec::new();
-        for (i, message) in messages.iter().enumerate() {
-            if let Some(body) = message.body() {
-                let flags: Vec<String> = message.flags().iter().map(|f| f.to_string()).collect();
-                // Skip messages without valid UIDs
-                let uid = match message.uid {
-                    Some(uid) if uid > 0 => uid.to_string(),
-                    _ => {
-                        debug_log(&format!("Message {} has invalid UID ({:?}), skipping", i + 1, message.uid));
-                        continue;
-                    }
-                };
-                
-                debug_log(&format!("Processing new email {}: UID={}, size={} bytes, flags={:?}", 
-                    i + 1, uid, body.len(), flags));
-                
-                match mail_parser::Message::parse(body) {
-                    Some(parsed) => {
-                        match Email::from_parsed_email(&parsed, &uid, folder, flags) {
-                            Ok(email) => {
-                                emails.push(email);
-                            }
-                            Err(e) => {
-                                debug_log(&format!("Failed to create email object: {}", e));
-                            }
-                        }
-                    }
-                    None => {
-                        debug_log("Failed to parse email");
-                    }
-                }
-            }
-        }
-        
-        debug_log(&format!("Successfully fetched {} new emails", emails.len()));
-        Ok(emails)
-    }
-    
-    /// Check if the IMAP connection is still healthy
-    fn is_connection_healthy_secure(&self, session: &mut imap::Session<native_tls::TlsStream<std::net::TcpStream>>) -> bool {
-        // Try a lightweight NOOP command to test connection
-        match session.noop() {
-            Ok(_) => {
-                debug_log("Connection health check: NOOP successful");
-                true
-            }
-            Err(e) => {
-                debug_log(&format!("Connection health check: NOOP failed: {}", e));
-                false
-            }
-        }
-    }
-    
-    /// Check if the plain IMAP connection is still healthy
-    fn is_connection_healthy_plain(&self, session: &mut imap::Session<std::net::TcpStream>) -> bool {
-        // Try a lightweight NOOP command to test connection
-        match session.noop() {
-            Ok(_) => {
-                debug_log("Connection health check (plain): NOOP successful");
-                true
-            }
-            Err(e) => {
-                debug_log(&format!("Connection health check (plain): NOOP failed: {}", e));
-                false
-            }
-        }
-    }
-    
-    /// Sync emails after reconnection to catch any missed during disconnection
-    fn sync_emails_after_reconnection(&self, folder: &str, last_known_count: usize, tx: &mpsc::Sender<Vec<Email>>) -> Result<usize, EmailError> {
-        debug_log(&format!("Syncing emails after reconnection - last known count: {}", last_known_count));
-        
-        // Get current email count
-        let current_count = match self.account.imap_security {
-            ImapSecurity::SSL | ImapSecurity::StartTLS => {
-                let mut session = self.connect_imap_with_security()?;
-                session.select(folder)
-                    .map_err(|e| EmailError::ImapError(e.to_string()))?;
-                session.search("ALL")
-                    .map_err(|e| EmailError::ImapError(e.to_string()))?
-                    .len()
-            }
-            ImapSecurity::None => {
-                let mut session = self.connect_imap_plain()?;
-                session.select(folder)
-                    .map_err(|e| EmailError::ImapError(e.to_string()))?;
-                session.search("ALL")
-                    .map_err(|e| EmailError::ImapError(e.to_string()))?
-                    .len()
-            }
-        };
-        
-        debug_log(&format!("Reconnection sync: current count {}, last known {}", current_count, last_known_count));
-        
-        if current_count > last_known_count {
-            let missed_count = current_count - last_known_count;
-            debug_log(&format!("Found {} emails that arrived during disconnection", missed_count));
-            
-            // Fetch the missed emails
-            match self.fetch_new_emails_since_count(folder, last_known_count) {
-                Ok(missed_emails) => {
-                    if !missed_emails.is_empty() {
-                        debug_log(&format!("Found {} missed emails", missed_emails.len()));
-                                            }
-                }
-                Err(e) => {
-                    debug_log(&format!("Failed to fetch missed emails: {}", e));
-                }
-            }
-        } else if current_count < last_known_count {
-            debug_log("Email count decreased - some emails may have been deleted");
-        } else {
-            debug_log("No new emails during disconnection");
-        }
-        
-        Ok(current_count)
-    }
-    
-    pub fn supports_idle(&self) -> bool {
-        // Try to connect and check capabilities
-        match self.account.imap_security {
-            ImapSecurity::SSL | ImapSecurity::StartTLS => {
-                if let Ok(mut session) = self.connect_imap_with_security() {
-                    session.capabilities().map(|caps| caps.has_str("IDLE")).unwrap_or(false)
-                } else {
-                    false
-                }
-            }
-            ImapSecurity::None => {
-                if let Ok(mut session) = self.connect_imap_plain() {
-                    session.capabilities().map(|caps| caps.has_str("IDLE")).unwrap_or(false)
-                } else {
-                    false
-                }
-            }
-        }
-    }
-    
     pub fn run_idle_session(
         &self,
         folder: &str,
         database: &crate::database::EmailDatabase,
         running: &Arc<Mutex<bool>>,
+        sync_tx: Option<std::sync::mpsc::Sender<()>>,
     ) -> Result<(), EmailError> {
         debug_log(&format!("Starting IDLE session for folder: {}", folder));
-        
-        match self.account.imap_security {
-            ImapSecurity::SSL | ImapSecurity::StartTLS => {
-                self.run_idle_session_secure(folder, database, running)
-            }
-            ImapSecurity::None => {
-                self.run_idle_session_plain(folder, database, running)
-            }
-        }
-    }
-    
-    fn run_idle_session_secure(
-        &self,
-        folder: &str,
-        database: &crate::database::EmailDatabase,
-        running: &Arc<Mutex<bool>>,
-    ) -> Result<(), EmailError> {
+
         let mut reconnect_attempts = 0;
-        const MAX_RECONNECT_ATTEMPTS: u32 = 10; // Increased for suspend/resume scenarios
-        let mut last_known_count = 0; // Track message count across reconnections
-        
+        const MAX_RECONNECT_ATTEMPTS: u32 = 10;
+
         loop {
-            // Check if we should stop
             {
                 let running_guard = running.lock().unwrap();
                 if !*running_guard {
-                    debug_log("IDLE session: stopping due to running flag");
                     return Ok(());
                 }
             }
-            
-            match self.run_single_idle_session_secure_with_count(folder, database, running, &mut last_known_count) {
-                Ok(_) => {
-                    debug_log("IDLE session completed normally");
-                    return Ok(());
-                }
+
+            match self.run_idle_loop(folder, database, running, sync_tx.as_ref()) {
+                Ok(_) => return Ok(()),
                 Err(e) => {
                     reconnect_attempts += 1;
                     debug_log(&format!("IDLE session error (attempt {}): {}", reconnect_attempts, e));
-                    
                     if reconnect_attempts >= MAX_RECONNECT_ATTEMPTS {
-                        debug_log("Max reconnection attempts reached, stopping IDLE session");
                         return Err(e);
                     }
-                    
-                    // Progressive backoff for reconnection attempts
-                    let backoff_seconds = std::cmp::min(5 * reconnect_attempts, 60);
-                    debug_log(&format!("Waiting {} seconds before reconnection attempt...", backoff_seconds));
-                    std::thread::sleep(std::time::Duration::from_secs(backoff_seconds as u64));
-                    
-                    debug_log(&format!("Attempting to reconnect IDLE session (last known count: {})...", last_known_count));
+                    let backoff = std::cmp::min(5 * reconnect_attempts, 60);
+                    std::thread::sleep(std::time::Duration::from_secs(backoff as u64));
                 }
             }
         }
     }
-    
-    fn run_single_idle_session_secure_with_count(
+
+    fn run_idle_loop(
         &self,
         folder: &str,
         database: &crate::database::EmailDatabase,
         running: &Arc<Mutex<bool>>,
-        last_known_count: &mut usize,
+        sync_tx: Option<&std::sync::mpsc::Sender<()>>,
     ) -> Result<(), EmailError> {
-        let mut session = self.connect_imap_with_security()?;
-        session.select(folder)
-            .map_err(|e| EmailError::ImapError(e.to_string()))?;
-        
-        debug_log("IDLE session: connected and folder selected");
-        
-        // Check if server supports IDLE
-        let caps = session.capabilities()
-            .map_err(|e| EmailError::ImapError(e.to_string()))?;
-        
+        match self.account.imap_security {
+            ImapSecurity::SSL | ImapSecurity::StartTLS => {
+                let mut session = self.connect_imap_with_security()?;
+                self.idle_loop(&mut session, folder, database, running, sync_tx)
+            }
+            ImapSecurity::None => {
+                let mut session = self.connect_imap_plain()?;
+                self.idle_loop(&mut session, folder, database, running, sync_tx)
+            }
+        }
+    }
+
+    fn idle_loop<S: imap::extensions::idle::SetReadTimeout + std::io::Read + std::io::Write>(
+        &self,
+        session: &mut imap::Session<S>,
+        folder: &str,
+        database: &crate::database::EmailDatabase,
+        running: &Arc<Mutex<bool>>,
+        sync_tx: Option<&std::sync::mpsc::Sender<()>>,
+    ) -> Result<(), EmailError> {
+        session.select(folder).map_err(|e| EmailError::ImapError(e.to_string()))?;
+
+        let caps = session.capabilities().map_err(|e| EmailError::ImapError(e.to_string()))?;
         if !caps.has_str("IDLE") {
-            debug_log("Server does not support IDLE, falling back to polling");
             return Err(EmailError::ImapError("Server does not support IDLE".to_string()));
         }
-        
-        debug_log("IDLE session: Server supports IDLE, starting suspend/resume resilient IDLE loop");
-        
-        // Sync any missed emails from previous disconnection and update count
-        // TODO: In new architecture, this is handled by sync daemon
-        // *last_known_count = self.sync_emails_after_reconnection(folder, *last_known_count, tx)?;
-        debug_log(&format!("IDLE session: message count after reconnection sync: {}", last_known_count));
-        
-        // Main IDLE loop with shorter timeouts for better suspend/resume handling
-        let mut consecutive_health_checks = 0;
-        const MAX_HEALTH_CHECK_FAILURES: u32 = 3;
-        
+
+        debug_log("IDLE session: connected, starting IDLE loop");
+
         loop {
-            // Check if we should stop
             {
                 let running_guard = running.lock().unwrap();
                 if !*running_guard {
-                    debug_log("IDLE session: stopping due to running flag");
                     return Ok(());
                 }
             }
-            
-            // Use shorter IDLE timeout (30 seconds) for better suspend/resume detection
-            debug_log("IDLE session: starting IDLE command with 30-second timeout");
-            
-            // Separate the IDLE operation to ensure proper scoping
-            let idle_result = {
-                match session.idle() {
-                    Ok(idle_handle) => {
-                        debug_log("IDLE session: IDLE started, waiting for notifications or timeout");
-                        
-                        // Wait for 30 seconds or until notification
-                        let timeout = std::time::Duration::from_secs(30);
-                        idle_handle.wait_with_timeout(timeout)
-                    }
-                    Err(e) => {
-                        debug_log(&format!("IDLE session: failed to start IDLE: {}", e));
-                        return Err(EmailError::ImapError(e.to_string()));
-                    }
-                }
+
+            let idle_result = match session.idle() {
+                Ok(handle) => handle.wait_with_timeout(std::time::Duration::from_secs(30)),
+                Err(e) => return Err(EmailError::ImapError(e.to_string())),
             };
-            
-            // Process IDLE result (IDLE handle is now dropped)
+
             match idle_result {
                 Ok(_) => {
-                    debug_log("IDLE session: received server notification");
-                    consecutive_health_checks = 0; // Reset health check counter
-                    
-                    // Check current message count
-                    let current_count = session.search("ALL")
-                        .map_err(|e| EmailError::ImapError(e.to_string()))?
-                        .len();
-                    
-                    debug_log(&format!("IDLE session: message count changed from {} to {}", 
-                        last_known_count, current_count));
-                    
-                    if current_count != *last_known_count {
-                        // Fetch new emails incrementally
-                        match self.fetch_new_emails_since_count(folder, *last_known_count) {
-                            Ok(new_emails) => {
-                                if !new_emails.is_empty() {
-                                    debug_log(&format!("IDLE session: saving {} new emails to database", new_emails.len()));
-                                    if let Err(e) = database.save_emails(&self.account.email, folder, &new_emails) {
-                                        debug_log(&format!("IDLE session: failed to save emails to database: {}", e));
-                                    } else {
-                                        debug_log("IDLE session: new emails saved to database");
-                                    }
+                    // Server notified us of a change — run a normal sync
+                    debug_log("IDLE session: server notification, syncing");
+                    match self.fetch_emails(folder, 0) {
+                        Ok(emails) => {
+                            if let Err(e) = database.save_emails(&self.account.email, folder, &emails) {
+                                debug_log(&format!("IDLE session: failed to save: {}", e));
+                            } else {
+                                debug_log(&format!("IDLE session: synced {} emails", emails.len()));
+                                if let Some(tx) = sync_tx {
+                                    let _ = tx.send(());
                                 }
                             }
-                            Err(e) => {
-                                debug_log(&format!("IDLE session: failed to fetch new emails: {}", e));
-                                // Continue IDLE loop even if fetch fails
-                            }
                         }
-                        *last_known_count = current_count;
-                    }
-                }
-                Err(e) => {
-                    debug_log(&format!("IDLE session: timeout or error: {}", e));
-                    
-                    // After timeout, check connection health
-                    if !self.is_connection_healthy_secure(&mut session) {
-                        consecutive_health_checks += 1;
-                        debug_log(&format!("IDLE session: connection health check failed (attempt {})", consecutive_health_checks));
-                        
-                        if consecutive_health_checks >= MAX_HEALTH_CHECK_FAILURES {
-                            debug_log("IDLE session: multiple health check failures, triggering reconnection");
-                            return Err(EmailError::ImapError("Connection health check failed multiple times".to_string()));
+                        Err(e) => {
+                            debug_log(&format!("IDLE session: fetch failed: {}", e));
                         }
-                    } else {
-                        consecutive_health_checks = 0; // Reset counter on successful health check
-                        debug_log("IDLE session: connection healthy after timeout");
                     }
                 }
-            }
-            
-            // Small delay before next IDLE cycle
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
-    }
-    
-
-    
-    fn run_idle_session_plain(
-        &self,
-        folder: &str,
-        database: &crate::database::EmailDatabase,
-        running: &Arc<Mutex<bool>>,
-    ) -> Result<(), EmailError> {
-        let mut reconnect_attempts = 0;
-        const MAX_RECONNECT_ATTEMPTS: u32 = 10; // Increased for suspend/resume scenarios
-        let mut last_known_count = 0; // Track message count across reconnections
-        
-        loop {
-            // Check if we should stop
-            {
-                let running_guard = running.lock().unwrap();
-                if !*running_guard {
-                    debug_log("IDLE session (plain): stopping due to running flag");
-                    return Ok(());
-                }
-            }
-            
-            match self.run_single_idle_session_plain_with_count(folder, database, running, &mut last_known_count) {
-                Ok(_) => {
-                    debug_log("IDLE session (plain) completed normally");
-                    return Ok(());
-                }
-                Err(e) => {
-                    reconnect_attempts += 1;
-                    debug_log(&format!("IDLE session (plain) error (attempt {}): {}", reconnect_attempts, e));
-                    
-                    if reconnect_attempts >= MAX_RECONNECT_ATTEMPTS {
-                        debug_log("Max reconnection attempts reached, stopping IDLE session (plain)");
-                        return Err(e);
+                Err(_) => {
+                    // Timeout — check connection health
+                    match session.noop() {
+                        Ok(_) => {} // Connection healthy
+                        Err(_) => return Err(EmailError::ImapError("Connection lost".to_string())),
                     }
-                    
-                    // Progressive backoff for reconnection attempts
-                    let backoff_seconds = std::cmp::min(5 * reconnect_attempts, 60);
-                    debug_log(&format!("Waiting {} seconds before reconnection attempt...", backoff_seconds));
-                    std::thread::sleep(std::time::Duration::from_secs(backoff_seconds as u64));
-                    
-                    debug_log(&format!("Attempting to reconnect IDLE session (plain) (last known count: {})...", last_known_count));
                 }
             }
         }
     }
     
-    fn run_single_idle_session_plain_with_count(
-        &self,
-        folder: &str,
-        database: &crate::database::EmailDatabase,
-        running: &Arc<Mutex<bool>>,
-        last_known_count: &mut usize,
-    ) -> Result<(), EmailError> {
-        let mut session = self.connect_imap_plain()?;
-        session.select(folder)
-            .map_err(|e| EmailError::ImapError(e.to_string()))?;
-        
-        debug_log("IDLE session (plain): connected and folder selected");
-        
-        // Check if server supports IDLE
-        let caps = session.capabilities()
-            .map_err(|e| EmailError::ImapError(e.to_string()))?;
-        
-        if !caps.has_str("IDLE") {
-            debug_log("Server does not support IDLE, falling back to polling");
-            return Err(EmailError::ImapError("Server does not support IDLE".to_string()));
-        }
-        
-        debug_log("IDLE session (plain): Server supports IDLE, starting suspend/resume resilient IDLE loop");
-        
-        // Sync any missed emails from previous disconnection and update count
-        // TODO: In new architecture, this is handled by sync daemon
-        // *last_known_count = self.sync_emails_after_reconnection(folder, *last_known_count, tx)?;
-        debug_log(&format!("IDLE session (plain): message count after reconnection sync: {}", last_known_count));
-        
-        // Main IDLE loop with shorter timeouts for better suspend/resume handling
-        let mut consecutive_health_checks = 0;
-        const MAX_HEALTH_CHECK_FAILURES: u32 = 3;
-        
-        loop {
-            // Check if we should stop
-            {
-                let running_guard = running.lock().unwrap();
-                if !*running_guard {
-                    debug_log("IDLE session (plain): stopping due to running flag");
-                    return Ok(());
-                }
-            }
-            
-            // Use shorter IDLE timeout (30 seconds) for better suspend/resume detection
-            debug_log("IDLE session (plain): starting IDLE command with 30-second timeout");
-            
-            // Separate the IDLE operation to ensure proper scoping
-            let idle_result = {
-                match session.idle() {
-                    Ok(idle_handle) => {
-                        debug_log("IDLE session (plain): IDLE started, waiting for notifications or timeout");
-                        
-                        // Wait for 30 seconds or until notification
-                        let timeout = std::time::Duration::from_secs(30);
-                        idle_handle.wait_with_timeout(timeout)
-                    }
-                    Err(e) => {
-                        debug_log(&format!("IDLE session (plain): failed to start IDLE: {}", e));
-                        return Err(EmailError::ImapError(e.to_string()));
-                    }
-                }
-            };
-            
-            // Process IDLE result (IDLE handle is now dropped)
-            match idle_result {
-                Ok(_) => {
-                    debug_log("IDLE session (plain): received server notification");
-                    consecutive_health_checks = 0; // Reset health check counter
-                    
-                    // Check current message count
-                    let current_count = session.search("ALL")
-                        .map_err(|e| EmailError::ImapError(e.to_string()))?
-                        .len();
-                    
-                    debug_log(&format!("IDLE session (plain): message count changed from {} to {}", 
-                        last_known_count, current_count));
-                    
-                    if current_count != *last_known_count {
-                        // Fetch new emails incrementally
-                        match self.fetch_new_emails_since_count(folder, *last_known_count) {
-                            Ok(new_emails) => {
-                                if !new_emails.is_empty() {
-                                    debug_log(&format!("IDLE session (plain): saving {} new emails to database", new_emails.len()));
-                                    if let Err(e) = database.save_emails(&self.account.email, folder, &new_emails) {
-                                        debug_log(&format!("IDLE session (plain): failed to save emails to database: {}", e));
-                                    } else {
-                                        debug_log("IDLE session (plain): new emails saved to database");
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                debug_log(&format!("IDLE session (plain): failed to fetch new emails: {}", e));
-                                // Continue IDLE loop even if fetch fails
-                            }
-                        }
-                        *last_known_count = current_count;
-                    }
-                }
-                Err(e) => {
-                    debug_log(&format!("IDLE session (plain): timeout or error: {}", e));
-                    
-                    // After timeout, check connection health
-                    if !self.is_connection_healthy_plain(&mut session) {
-                        consecutive_health_checks += 1;
-                        debug_log(&format!("IDLE session (plain): connection health check failed (attempt {})", consecutive_health_checks));
-                        
-                        if consecutive_health_checks >= MAX_HEALTH_CHECK_FAILURES {
-                            debug_log("IDLE session (plain): multiple health check failures, triggering reconnection");
-                            return Err(EmailError::ImapError("Connection health check failed multiple times".to_string()));
-                        }
-                    } else {
-                        consecutive_health_checks = 0; // Reset counter on successful health check
-                        debug_log("IDLE session (plain): connection healthy after timeout");
-                    }
-                }
-            }
-            
-            // Small delay before next IDLE cycle
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
-    }
-    
-
-
     #[allow(dead_code)]
     pub fn move_email(&self, email: &Email, target_folder: &str) -> Result<(), EmailError> {
         match self.account.imap_security {
@@ -2737,114 +2256,6 @@ impl EmailClient {
                 Ok(emails)
             }
         }
-    }
-}
-
-// Background email fetcher with IMAP IDLE support
-#[allow(dead_code)]
-pub struct EmailFetcher {
-    client: EmailClient,
-    tx: mpsc::Sender<Vec<Email>>,
-    interval: std::time::Duration,
-    running: Arc<Mutex<bool>>,
-    handle: Option<std::thread::JoinHandle<()>>,
-    use_idle: bool,
-}
-
-impl EmailFetcher {
-    #[allow(dead_code)]
-    pub fn new(
-        client: EmailClient, 
-        tx: mpsc::Sender<Vec<Email>>,
-        interval_secs: u64,
-    ) -> Self {
-        // Check if server supports IDLE
-        let use_idle = client.supports_idle();
-        debug_log(&format!("Server IDLE support: {}", use_idle));
-        
-        Self {
-            client,
-            tx,
-            interval: std::time::Duration::from_secs(interval_secs),
-            running: Arc::new(Mutex::new(false)),
-            handle: None,
-            use_idle,
-        }
-    }
-    
-    #[allow(dead_code)]
-    pub fn start(&mut self) {
-        // Set running flag
-        {
-            let mut running = self.running.lock().unwrap();
-            *running = true;
-        }
-        
-        let client = self.client.clone();
-        let tx = self.tx.clone();
-        let interval = self.interval;
-        let running = self.running.clone();
-        
-        let handle = std::thread::spawn(move || {
-            let current_folder = "INBOX".to_string();
-            
-            while {
-                let should_continue = {
-                    let running_guard = running.lock().unwrap();
-                    *running_guard
-                };
-                should_continue
-            } {
-                // Fetch emails without holding the lock during network operations
-                match client.fetch_emails(&current_folder, 200) {
-                    Ok(emails) => {
-                        // Try to send emails
-                        if let Err(e) = tx.send(emails) {
-                            // Receiver is closed, exit the loop
-                            debug_log(&format!("Email channel closed: {}", e));
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        log::error!("Failed to fetch emails: {}", e);
-                    }
-                }
-                
-                // Sleep for the specified interval
-                std::thread::sleep(interval);
-            }
-        });
-        
-        self.handle = Some(handle);
-    }
-    
-    pub fn stop(&mut self) {
-        // Set running flag to false
-        {
-            let mut running = self.running.lock().unwrap();
-            *running = false;
-        }
-        
-        // Wait for the thread to finish
-        if let Some(handle) = self.handle.take() {
-            if let Err(e) = handle.join() {
-                log::error!("Error joining email fetcher thread: {:?}", e);
-            }
-        }
-    }
-    
-    #[allow(dead_code)]
-    pub fn set_folder(&self, folder: String) {
-        // For now, we'll keep it simple and just use INBOX
-        // In a more advanced implementation, we could use channels to communicate
-        // folder changes to the background thread
-        log::debug!("Folder change requested: {}", folder);
-    }
-}
-
-impl Drop for EmailFetcher {
-    fn drop(&mut self) {
-        self.stop();
     }
 }
 

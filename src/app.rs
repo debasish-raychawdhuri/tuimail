@@ -214,6 +214,10 @@ pub struct App {
     pub sync_thread_running: Arc<AtomicBool>,
     pub sync_thread_handle: Option<thread::JoinHandle<()>>,
 
+    // Channel for background threads to notify UI of new emails
+    pub sync_notify_rx: Option<std::sync::mpsc::Receiver<()>>,
+    pub sync_notify_tx: std::sync::mpsc::Sender<()>,
+
     // UI timestamp tracking for efficient new email detection
     pub ui_timestamps: std::collections::HashMap<String, chrono::DateTime<chrono::Utc>>,
     
@@ -310,7 +314,9 @@ impl App {
             }
         }
 
-        Self {
+        let (sync_tx, sync_rx) = std::sync::mpsc::channel();
+
+        let mut app = Self {
             config,
             credentials,
             database,
@@ -386,6 +392,10 @@ impl App {
             sync_thread_running: Arc::new(AtomicBool::new(false)),
             sync_thread_handle: None,
 
+            // Sync notification channel (initialized below)
+            sync_notify_rx: None,
+            sync_notify_tx: sync_tx,
+
             // UI timestamp tracking
             ui_timestamps: std::collections::HashMap::new(),
             
@@ -400,7 +410,9 @@ impl App {
             pre_search_emails: Vec::new(),
             pre_search_selected_idx: None,
             search_active: false,
-        }
+        };
+        app.sync_notify_rx = Some(sync_rx);
+        app
     }
 
     // Multi-account support methods
@@ -1799,6 +1811,7 @@ impl App {
         // Get data needed for sync thread
         let database_path = self.database.get_database_path();
         let config = self.config.clone();
+        let sync_tx = self.sync_notify_tx.clone();
 
         // Set running flag
         self.sync_thread_running.store(true, Ordering::Relaxed);
@@ -2000,6 +2013,7 @@ impl App {
                                                     debug_log(&format!("Failed to save emails: {}", e));
                                                 } else {
                                                     debug_log(&format!("Synced {} emails for {}", emails.len(), account.email));
+                                                    let _ = sync_tx.send(());
                                                 }
                                             }
                                             Err(e) => {
@@ -2017,15 +2031,15 @@ impl App {
                 }
                 
                 // Sleep between syncs, checking for pending operations periodically
-                // Check operations every 5 seconds, full sync every 60 seconds
-                for i in 0..12 {
+                // Check operations every 5 seconds, full sync every 30 seconds
+                for i in 0..6 {
                     if !running_flag.load(Ordering::Relaxed) {
                         break;
                     }
                     std::thread::sleep(Duration::from_secs(5));
 
                     // Check for pending operations every 5 seconds
-                    if i < 11 {
+                    if i < 5 {
                         match database.get_pending_operations() {
                             Ok(operations) => {
                                 if !operations.is_empty() {
@@ -2174,115 +2188,41 @@ impl App {
         debug_log("App cleanup completed");
     }
 
-    /// Refresh emails from database (called periodically) - optimized with sync tracker
+    /// Refresh emails from database — called when background sync/IDLE notifies of new data
     pub fn refresh_emails_from_database(&mut self) -> AppResult<()> {
         let (account_idx, folder_path) = if let Some((idx, path)) = self.get_selected_folder_info() {
             (idx, path)
         } else {
-            // Fallback: use current account and selected_folder field
-            debug_log(&format!("refresh_emails_from_database: get_selected_folder_info() returned None, using fallback. selected_folder='{}'", self.selected_folder));
-            
-            // Safety check: ensure selected_folder is valid
             let mut folder = self.selected_folder.clone();
             if folder.is_empty() || folder == "Queue" {
                 folder = "INBOX".to_string();
-                debug_log(&format!("Invalid selected_folder '{}', using INBOX instead", self.selected_folder));
                 self.selected_folder = folder.clone();
             }
-            
             (self.current_account_idx, folder)
         };
-        
+
         let account_email = if let Some(account_data) = self.accounts.get(&account_idx) {
             account_data.account.email.clone()
         } else {
             return Ok(());
         };
 
-        // Get UI's last known timestamp for this account/folder
-        let ui_key = format!("{}:{}", account_email, folder_path);
-        let ui_timestamp = self.ui_timestamps.get(&ui_key)
-            .copied()
-            .unwrap_or_else(|| chrono::DateTime::from_timestamp(0, 0).unwrap_or_else(chrono::Utc::now));
-
-        // Always check if UI is empty first, regardless of sync tracker
-        let ui_is_empty = if let Some(account_data) = self.accounts.get(&account_idx) {
-            account_data.emails.is_empty()
-        } else {
-            true
-        };
-
-        if ui_is_empty {
-            // UI is empty, load recent emails from per-account database
-            debug_log(&format!("UI is empty, loading recent emails from database for {}/{}", account_email, folder_path));
-            let acct_db = Self::get_account_database_for(&account_email);
-            let db_ref = acct_db.as_ref().map(|d| d as &crate::database::EmailDatabase).unwrap_or(&self.database);
-            match db_ref.get_recent_email_summaries(&account_email, &folder_path, 500) {
-                Ok(summaries) => {
-                    debug_log(&format!("Loaded {} email summaries for empty UI", summaries.len()));
-                    if let Some(account_data) = self.accounts.get_mut(&account_idx) {
-                        account_data.emails = summaries;
-                        if account_idx == self.current_account_idx {
-                            self.emails = account_data.emails.clone();
-                            debug_log(&format!("Updated UI emails: {} emails now visible", self.emails.len()));
-                        }
-                    }
-                    return Ok(());
-                }
-                Err(e) => {
-                    debug_log(&format!("Error loading existing emails: {}", e));
-                }
-            }
-        }
-
-        // Check if there are potentially new emails using the sync tracker
-        if !has_new_emails_since_global(&account_email, &folder_path, ui_timestamp) {
-            // No new emails detected, skip expensive database queries
-            return Ok(());
-        }
-
-        debug_log(&format!(
-            "Sync tracker indicates new emails for {}/{}, checking database",
-            account_email, folder_path
-        ));
-
-        // Reload summaries from per-account database (uses EXISTS subquery for has_attachments)
-        let acct_db2 = Self::get_account_database_for(&account_email);
-        let db_ref2 = acct_db2.as_ref().map(|d| d as &crate::database::EmailDatabase).unwrap_or(&self.database);
-        match db_ref2.get_recent_email_summaries(&account_email, &folder_path, 500) {
-            Ok(summaries) if !summaries.is_empty() => {
-                let old_count = if let Some(ad) = self.accounts.get(&account_idx) { ad.emails.len() } else { 0 };
-                if summaries.len() != old_count {
-                    debug_log(&format!(
-                        "Refreshed summaries for {}/{}: {} -> {} emails",
-                        account_email, folder_path, old_count, summaries.len()
-                    ));
-                }
-
+        let acct_db = Self::get_account_database_for(&account_email);
+        let db_ref = acct_db.as_ref().map(|d| d as &crate::database::EmailDatabase).unwrap_or(&self.database);
+        match db_ref.get_recent_email_summaries(&account_email, &folder_path, 500) {
+            Ok(summaries) => {
                 if let Some(account_data) = self.accounts.get_mut(&account_idx) {
                     account_data.emails = summaries;
-
                     if account_idx == self.current_account_idx {
                         self.emails = account_data.emails.clone();
                     }
-
-                    if let Some(latest_email) = account_data.emails.first() {
-                        let email_time = latest_email.date.with_timezone(&chrono::Utc);
-                        self.ui_timestamps.insert(ui_key, email_time);
-                    }
-                }
-            }
-            Ok(_) => {
-                // No new emails, but update UI timestamp to current sync timestamp
-                if let Some(sync_timestamp) = get_global_sync_timestamp(&account_email, &folder_path) {
-                    self.ui_timestamps.insert(ui_key, sync_timestamp);
                 }
             }
             Err(e) => {
-                debug_log(&format!("Error checking for new emails: {}", e));
+                debug_log(&format!("Error refreshing emails from database: {}", e));
             }
         }
-        
+
         Ok(())
     }
 
@@ -4395,43 +4335,33 @@ impl App {
 
         if let Some(account_data) = self.accounts.get(&account_idx) {
             if let Some(client) = &account_data.email_client {
-                // Check if server supports IDLE
-                if client.supports_idle() {
-                    debug_log("Starting background email fetching with IDLE support");
+                debug_log("Starting background email fetching with IDLE support");
 
-                    let running = std::sync::Arc::new(std::sync::Mutex::new(true));
+                let running = std::sync::Arc::new(std::sync::Mutex::new(true));
+                let client_clone = client.clone();
+                let folder_clone = folder.to_string();
+                let running_clone = running.clone();
+                let sync_tx = self.sync_notify_tx.clone();
 
-                    // Clone what we need for the background thread
-                    let client_clone = client.clone();
-                    let folder_clone = folder.to_string();
-                    let running_clone = running.clone();
+                std::thread::spawn(move || {
+                    let cache_dir = format!("{}/.cache/tuimail", std::env::var("HOME").unwrap_or_default());
+                    let db_path = std::path::PathBuf::from(&cache_dir).join("emails.db");
 
-                    // Start background thread - it will create its own database connection
-                    std::thread::spawn(move || {
-                        // Create a new database connection for this thread
-                        let cache_dir = format!("{}/.cache/tuimail", std::env::var("HOME").unwrap_or_default());
-                        let db_path = std::path::PathBuf::from(&cache_dir).join("emails.db");
-                        
-                        match crate::database::EmailDatabase::new(&db_path) {
-                            Ok(database) => {
-                                if let Err(e) = client_clone.run_idle_session(&folder_clone, &database, &running_clone) {
-                                    debug_log(&format!("IDLE session ended with error: {}", e));
-                                }
-                            }
-                            Err(e) => {
-                                debug_log(&format!("Failed to create database connection in background thread: {}", e));
+                    match crate::database::EmailDatabase::new(&db_path) {
+                        Ok(database) => {
+                            if let Err(e) = client_clone.run_idle_session(&folder_clone, &database, &running_clone, Some(sync_tx)) {
+                                debug_log(&format!("IDLE session ended with error: {}", e));
                             }
                         }
-                    });
+                        Err(e) => {
+                            debug_log(&format!("Failed to create database connection in background thread: {}", e));
+                        }
+                    }
+                });
 
-                    // No longer need email_receiver since we're using database
-                    self.email_receiver = None;
-                    self.fetcher_running = Some(running);
-                    
-                    debug_log("Background email fetching started");
-                } else {
-                    debug_log("Server does not support IDLE, background fetching disabled");
-                }
+                self.email_receiver = None;
+                self.fetcher_running = Some(running);
+                debug_log("Background email fetching started");
             }
         }
 

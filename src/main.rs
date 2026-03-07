@@ -500,34 +500,22 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> AppRe
     
     let mut consecutive_errors = 0;
     const MAX_CONSECUTIVE_ERRORS: u32 = 10;
-    
-    // Add database polling timer
-    let mut last_db_poll = std::time::Instant::now();
-    const DB_POLL_INTERVAL: Duration = Duration::from_secs(30); // Poll database every 30 seconds
 
     // Initial UI draw on startup
     terminal.draw(|frame| ui(frame, app))?;
 
     loop {
-        // Poll database for changes periodically
-        if last_db_poll.elapsed() >= DB_POLL_INTERVAL {
-            if let Err(e) = app.refresh_emails_from_database() {
-                // Log error but don't fail the UI
-                if std::env::var("EMAIL_DEBUG").is_ok() {
-                    let log_file = "/tmp/tuimail_debug.log";
-                    if let Ok(mut file) = std::fs::OpenOptions::new()
-                        .create(true)
-                        .write(true)
-                        .append(true)
-                        .open(log_file)
-                    {
-                        use std::io::Write;
-                        let _ = writeln!(file, "[{}] Database poll error: {}",
-                            Local::now().format("%Y-%m-%d %H:%M:%S"), e);
-                    }
+        // Check if background sync/IDLE saved new emails
+        if let Some(ref rx) = app.sync_notify_rx {
+            if rx.try_recv().is_ok() {
+                // Drain any additional notifications
+                while rx.try_recv().is_ok() {}
+                if let Err(e) = app.refresh_emails_from_database() {
+                    crate::email::debug_log(&format!("Sync notification refresh error: {}", e));
                 }
+                // Redraw UI with new emails
+                let _ = terminal.draw(|frame| ui(frame, app));
             }
-            last_db_poll = std::time::Instant::now();
         }
 
         // Handle events — block for up to 1 second
